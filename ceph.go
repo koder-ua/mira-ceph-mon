@@ -337,20 +337,30 @@ func newLm() *latMonitor {
 }
 
 func (lm *latMonitor) start(osdIDS []int, cluster string, timeout int, min, max, bins uint32) {
+	if lm.running {
+		log.Fatal("Starting already running monitor")
+	}
+
 	latsListChan := make(chan *cephLats)
 	go monitoringFiber(osdIDS, cluster, timeout, latsListChan, lm.quit, &lm.wg)
 	go latStorageFiber(latsListChan, lm.latsHistoChan, &lm.wg, min, max, bins)
 	log.Printf("Monitoring started, result channel is %v", lm.latsHistoChan)
 	lm.wg.Add(2)
+	lm.running = true
 }
 
 func (lm *latMonitor) stop() {
-	lm.quit <- struct{}{}
-	lm.wg.Wait()
-	lm.running = false
+	if lm.running {
+		lm.quit <- struct{}{}
+		lm.wg.Wait()
+		lm.running = false
+	}
 }
 
 func (lm *latMonitor) get() *cephLatsHisto {
+	if !lm.running {
+		return nil
+	}
 	return <-lm.latsHistoChan
 }
 

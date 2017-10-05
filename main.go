@@ -65,7 +65,7 @@ func main() {
 
 	if *httpAddr != "" {
 		log.Printf("Starting http server at %s", *httpAddr)
-		//rpcServer(*rpcAddr, lm)
+		httpServe(*httpAddr, lm)
 	}
 
 	if *rpcAddr == "" {
