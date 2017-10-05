@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package main;
+
+message CephStatus {
+    uint32 Status = 1;
+    uint32 UsedG = 2;
+    uint32 FreeG = 3;
+    uint32 DataG = 4;
+    uint32 ReadBPS = 5;
+    uint32 WriteBPS = 6;
+    uint32 ReadsPS = 7;
+    uint32 WritesPS = 8;
+    repeated uint32 OsdLats = 9;
+}
+
+message CephOpsLats {
+    uint32 RSize = 1;
+    uint32 RSkipped = 2;
+    uint32 WSkipped = 3;
+    repeated uint32 LatHisto = 4;
+}
+
+message CephSettings {
+    string Cluster = 1;
+    uint32 HistoryTime = 2;
+    uint32 HistorySize = 3;
+    uint32 LatsCollectTimeout = 4;
+    uint32 HistoMin = 5;
+    uint32 HistoMax = 6;
+    uint32 HistoBins = 7;
+    repeated uint32 OsdIDS = 8;
+}
+
+message Empty{}
+
+service SensorRPC {
+    rpc GetCephStatus(Empty) returns (CephStatus) {}
+
+    rpc SetupLatencyMonitoring(CephSettings) returns (Empty) {}
+    rpc GetCephOpsLats(Empty) returns (CephOpsLats) {}
+    rpc StopLatencyMonitoring(Empty) returns (Empty) {}
+}

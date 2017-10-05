@@ -1,0 +1,90 @@
+{
+   "fsid" : "3d942c68-6df6-4b2e-81d4-0c47505fb994",
+   "monmap" : {
+      "created" : "2017-06-20 00:33:54.174053",
+      "epoch" : 1,
+      "modified" : "2017-06-20 00:33:54.174053",
+      "fsid" : "3d942c68-6df6-4b2e-81d4-0c47505fb994",
+      "mons" : [
+         {
+            "addr" : "192.168.122.4:6789/0",
+            "name" : "ceph-mon",
+            "rank" : 0
+         }
+      ]
+   },
+   "quorum" : [
+      0
+   ],
+   "election_epoch" : 13,
+   "pgmap" : {
+      "bytes_used" : 12862033920,
+      "read_op_per_sec" : 157,
+      "version" : 114262,
+      "write_bytes_sec" : 676164,
+      "write_op_per_sec" : 330,
+      "num_pgs" : 112,
+      "read_bytes_sec" : 637928,
+      "data_bytes" : 5527836252,
+      "bytes_avail" : 64350826496,
+      "bytes_total" : 77212860416,
+      "pgs_by_state" : [
+         {
+            "state_name" : "active+clean",
+            "count" : 112
+         }
+      ]
+   },
+   "fsmap" : {
+      "by_rank" : [],
+      "epoch" : 1
+   },
+   "quorum_names" : [
+      "ceph-mon"
+   ],
+   "osdmap" : {
+      "osdmap" : {
+         "num_osds" : 4,
+         "epoch" : 483,
+         "nearfull" : false,
+         "num_remapped_pgs" : 0,
+         "num_up_osds" : 4,
+         "num_in_osds" : 4,
+         "full" : false
+      }
+   },
+   "health" : {
+      "summary" : [],
+      "health" : {
+         "health_services" : [
+            {
+               "mons" : [
+                  {
+                     "kb_avail" : 31962544,
+                     "avail_percent" : 87,
+                     "kb_total" : 36496992,
+                     "store_stats" : {
+                        "bytes_log" : 1279191,
+                        "bytes_total" : 17692261,
+                        "last_updated" : "0.000000",
+                        "bytes_sst" : 0,
+                        "bytes_misc" : 16413070
+                     },
+                     "health" : "HEALTH_OK",
+                     "name" : "ceph-mon",
+                     "kb_used" : 2657456,
+                     "last_updated" : "2017-09-24 11:32:34.932745"
+                  }
+               ]
+            }
+         ]
+      },
+      "detail" : [],
+      "overall_status" : "HEALTH_OK",
+      "timechecks" : {
+         "epoch" : 13,
+         "round" : 0,
+         "round_status" : "finished"
+      }
+   }
+}

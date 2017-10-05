@@ -12,3 +12,10 @@
 
 # Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
 .glide/
+bin/*
+.idea/*
+*.pyc
+__pycache__/*
+*.pb.go
+*_pb2.py
+*_pb2_grpc.py

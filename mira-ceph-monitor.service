@@ -1,0 +1,12 @@
+[Unit]
+Description=Mirantis ceph monitoring
+After=multi-user.target
+
+[Service]
+Type=idle
+ExecStart=/usr/bin/mira-ceph-monitor -logfile /var/log/mira-ceph-monitor.log -silent -rpc 0.0.0.0:5678
+StandardOutput=null
+
+[Install]
+WantedBy=multi-user.target
+Alias=mira-ceph-monitor
