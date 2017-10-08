@@ -441,6 +441,7 @@ def load_cycle(config: Dict[str, Any], storage: Storage) -> None:
                 if sleep_time > 0:
                     time.sleep(sleep_time)
     finally:
+        logger.info("Closing rpc")
         for rpc in list(osd_rpc.values()) + list(monitors_rpc.values()):
             try:
                 if rpc:

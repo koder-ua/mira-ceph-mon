@@ -21,6 +21,187 @@ const (
 	HealtheErr = iota
 )
 
+
+type cephLats struct {
+	rlats, wlats []uint32
+}
+
+type cephLatsHisto struct {
+	rlats, wlats []uint32
+}
+
+type cephMonitor struct {
+	cluster string
+	osdIDs []int
+	latsHistoChan chan *cephLatsHisto
+	latsHistoChanNoClear chan *cephLatsHisto
+	cephStatChan chan *CephStatus
+	quit chan struct{}
+	wg sync.WaitGroup
+	running bool
+	timeout int
+}
+
+
+func newCephMonitor() *cephMonitor {
+	return &cephMonitor{
+		latsHistoChan: make(chan *cephLatsHisto),
+		latsHistoChanNoClear: make(chan *cephLatsHisto),
+		cephStatChan: make(chan *CephStatus),
+		quit: make(chan struct{}),
+		running: false,
+		osdIDs: make([]int, 0),
+	}
+}
+
+
+func (cm *cephMonitor) start(osdIDS []int, cluster string, timeout int, min, max, bins uint32) {
+	if cm.running {
+		log.Fatal("Starting already running monitor")
+	}
+
+	cm.cluster = cluster
+	cm.osdIDs = make([]int, len(osdIDS))
+	copy(cm.osdIDs, osdIDS)
+	latsListChan := make(chan *cephLats, 1)
+	statProxyChan := make(chan *CephStatus, 1)
+	cm.quit = make(chan struct{})
+	cm.timeout = timeout
+	cm.wg.Add(3)
+	go cm.statusMonitoringFiber(statProxyChan)
+	go cm.latencyMonitoringFiber(latsListChan)
+	go cm.storageFiber(latsListChan, statProxyChan, min, max, bins)
+	log.Printf("Monitoring started, result channel is %v", cm.latsHistoChan)
+	cm.running = true
+}
+
+func (cm *cephMonitor) statusMonitoringFiber(statProxyChan chan<- *CephStatus) {
+	log.Printf("Status monitoring fiber started")
+	defer cm.wg.Done()
+	for {
+		select{
+		case <- cm.quit:
+			log.Printf("Status monitoring fiber stopped due to quit channel closed")
+			close(statProxyChan)
+			return
+		case <- time.After(time.Second * time.Duration(cm.timeout)):
+			log.Printf("Getting new ceph status")
+			stat, _ := getCephStatus(cm.cluster)
+			statProxyChan <- stat
+		}
+	}
+}
+
+func (cm *cephMonitor) stop() {
+	if cm.running {
+		close(cm.quit)
+		cm.wg.Wait()
+		cm.running = false
+		log.Printf("All ceph bg fibers stopped")
+	}
+}
+
+func (cm *cephMonitor) get() *cephLatsHisto {
+	if !cm.running {
+		return nil
+	}
+	return <-cm.latsHistoChan
+}
+
+func (cm *cephMonitor) getNoClear() *cephLatsHisto {
+	if !cm.running {
+		return nil
+	}
+	return <-cm.latsHistoChanNoClear
+}
+
+func (cm *cephMonitor) getStatus() *CephStatus {
+	if !cm.running {
+		return nil
+	}
+	return <-cm.cephStatChan
+}
+
+func (cm *cephMonitor) reconfig(osdIDS []int, cluster string, timeout int, min, max, bins uint32) {
+	cm.stop()
+	cm.start(osdIDS, cluster, timeout, min, max, bins)
+}
+
+func (cm *cephMonitor) latencyMonitoringFiber(latsChan chan<- *cephLats) {
+	defer cm.wg.Done()
+	log.Printf("Latency monitoring fiber started")
+	prevOpsMap := make([]map[string]bool,  len(cm.osdIDs))
+	for idx := range cm.osdIDs {
+		prevOpsMap[idx] = make(map[string]bool)
+	}
+
+	sleep_duration := time.Duration(0)
+
+	for {
+		select{
+		case <- cm.quit:
+			close(latsChan)
+			log.Print("Latency monitoring fiber stopped due to cm.quit")
+			return
+		case <- time.After(sleep_duration):
+		}
+		start := time.Now()
+		log.Printf("Start collecting lats for osd id %v", cm.osdIDs)
+
+		wgSubl := sync.WaitGroup{}
+		wgSubl.Add(len(cm.osdIDs))
+
+		for idx, osdID := range cm.osdIDs {
+			go func(osdID int, prevOPS *map[string]bool) {
+				defer wgSubl.Done()
+				lats, err := getLatList(osdID, cm.cluster, prevOPS)
+				if err == nil {
+					latsChan <- lats
+				} else {
+					log.Printf("ERROR: Failed to get lat from %d: %v", osdID, err)
+				}
+			}(osdID, &prevOpsMap[idx])
+		}
+
+		wgSubl.Wait()
+
+		sleep_duration = time.Duration(cm.timeout) * time.Second - time.Now().Sub(start)
+		if sleep_duration < 0 {
+			sleep_duration = 0
+		}
+	}
+}
+
+func  (cm *cephMonitor) storageFiber(latsListChan <-chan *cephLats, statProxyChan <-chan *CephStatus, min, max, bins uint32) {
+	log.Printf("Storage fiber started")
+	defer cm.wg.Done()
+	rhisto := makeHisto(float64(min), float64(max), int(bins))
+	whisto := makeHisto(float64(min), float64(max), int(bins))
+	var currStatus *CephStatus
+	for {
+		select {
+		case status, ok := <-statProxyChan:
+			if !ok {
+				log.Printf("Storage fiber stopped due to statProxyChan closed")
+				return
+			}
+			currStatus = status
+		case cm.cephStatChan<- currStatus:
+		case newData, ok := <- latsListChan:
+			if !ok {
+				log.Printf("Storage fiber stopped due to latsListChan closed")
+				return
+			}
+			rhisto.update(newData.rlats)
+			whisto.update(newData.wlats)
+		case cm.latsHistoChan <- &cephLatsHisto{rhisto.bins, whisto.bins}:
+			whisto.clean()
+			rhisto.clean()
+		case cm.latsHistoChanNoClear <- &cephLatsHisto{rhisto.bins, whisto.bins}:
+		}
+	}
+}
+
 func (status *CephStatus) serialize()([]byte, error) {
 	return proto.Marshal(status)
 }
@@ -203,13 +384,6 @@ func parseCephOp(op *map[string]interface{}, prevOPS *map[string]bool) *cephOP {
 	return &cephOP{opTp, dt, descr}
 }
 
-type cephLats struct {
-	rlats, wlats []uint32
-}
-
-type cephLatsHisto struct {
-	rlats, wlats []uint32
-}
 
 func getLatList(osdID int, cluster string, prevOPS *map[string]bool) (*cephLats, error) {
 	cmd := []string{"dump_historic_ops"}
@@ -249,124 +423,6 @@ func getLatList(osdID int, cluster string, prevOPS *map[string]bool) (*cephLats,
 	}
 
 	return &cephLats{rtimes, wtimes}, nil
-}
-
-
-func monitoringFiber(osdIDS []int, cluster string, timeout int, latsChan chan<- *cephLats, quit <-chan struct{}, wg *sync.WaitGroup) {
-	defer wg.Done()
-	prevOpsMap := make([]map[string]bool,  len(osdIDS))
-	for idx := range osdIDS {
-		prevOpsMap[idx] = make(map[string]bool)
-	}
-
-	for {
-		select{
-		case <- quit:
-			close(latsChan)
-			log.Print("monitoring fiber stopped")
-			return
-		default:
-		}
-
-		log.Printf("Start collecting lats for osd id %v", osdIDS)
-		start := time.Now()
-
-		wgSubl := sync.WaitGroup{}
-		wgSubl.Add(len(osdIDS))
-
-		for idx, osdID := range osdIDS {
-			go func(osdID int, prevOPS *map[string]bool) {
-				defer wgSubl.Done()
-				lats, err := getLatList(osdID, cluster, prevOPS)
-				if err == nil {
-					latsChan <- lats
-				} else {
-					log.Printf("ERROR: Failed to get lat from %d: %v", osdID, err)
-				}
-			}(osdID, &prevOpsMap[idx])
-		}
-
-		wgSubl.Wait()
-
-		end := time.Now()
-		elapsed := time.Duration(timeout) * time.Second - end.Sub(start)
-		if elapsed > 0 {
-			time.Sleep(elapsed)
-		}
-	}
-}
-
-func latStorageFiber(latsListChan <-chan *cephLats, latsHistoChan chan<- *cephLatsHisto, wg *sync.WaitGroup,
-	min, max, bins uint32) {
-	defer wg.Done()
-	rhisto := makeHisto(float64(min), float64(max), int(bins))
-	whisto := makeHisto(float64(min), float64(max), int(bins))
-	for {
-		select {
-		case newData := <- latsListChan:
-			if newData == nil {
-				log.Printf("Stopping storage fiber")
-				return
-			}
-			rhisto.update(newData.rlats)
-			whisto.update(newData.wlats)
-			log.Printf("Get new lats chunk with len reads=%d, writes=%d", len(newData.rlats), len(newData.wlats))
-			//log.Printf("Updated, rhist == %v, whist == %v", rhisto.bins, whisto.bins)
-		case latsHistoChan <- &cephLatsHisto{rhisto.bins, whisto.bins}:
-			whisto.clean()
-			rhisto.clean()
-			log.Printf("Data requested, cleanup storage")
-		}
-	}
-}
-
-
-type latMonitor struct {
-	latsHistoChan chan *cephLatsHisto
-	quit chan struct{}
-	wg sync.WaitGroup
-	running bool
-}
-
-func newLm() *latMonitor {
-	return &latMonitor{
-		latsHistoChan: make(chan *cephLatsHisto),
-		quit: make(chan struct{}),
-		running: false,
-	}
-}
-
-func (lm *latMonitor) start(osdIDS []int, cluster string, timeout int, min, max, bins uint32) {
-	if lm.running {
-		log.Fatal("Starting already running monitor")
-	}
-
-	latsListChan := make(chan *cephLats)
-	go monitoringFiber(osdIDS, cluster, timeout, latsListChan, lm.quit, &lm.wg)
-	go latStorageFiber(latsListChan, lm.latsHistoChan, &lm.wg, min, max, bins)
-	log.Printf("Monitoring started, result channel is %v", lm.latsHistoChan)
-	lm.wg.Add(2)
-	lm.running = true
-}
-
-func (lm *latMonitor) stop() {
-	if lm.running {
-		lm.quit <- struct{}{}
-		lm.wg.Wait()
-		lm.running = false
-	}
-}
-
-func (lm *latMonitor) get() *cephLatsHisto {
-	if !lm.running {
-		return nil
-	}
-	return <-lm.latsHistoChan
-}
-
-func (lm *latMonitor) reconfig(osdIDS []int, cluster string, timeout int, min, max, bins uint32) {
-	lm.stop()
-	lm.start(osdIDS, cluster, timeout, min, max, bins)
 }
 
 

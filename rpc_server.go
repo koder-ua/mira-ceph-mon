@@ -15,11 +15,11 @@ type myRPCServer struct {
 	historySize        uint32
 	historyTime        uint32
 	latsCollectTimeout int
-	latsMonitor        *latMonitor
+	cm                 *cephMonitor
 }
 
-func (rpc *myRPCServer) init(lm *latMonitor) {
-	rpc.latsMonitor = lm
+func (rpc *myRPCServer) init(cm *cephMonitor) {
+	rpc.cm = cm
 }
 
 func (rpc *myRPCServer) SetupLatencyMonitoring(ctx context.Context, sett *CephSettings) (*Empty, error) {
@@ -40,17 +40,17 @@ func (rpc *myRPCServer) SetupLatencyMonitoring(ctx context.Context, sett *CephSe
 		}
 	}
 
-	rpc.latsMonitor.reconfig(rpc.osdIds, rpc.clusterName, rpc.latsCollectTimeout,
-							 sett.HistoMin, sett.HistoMax, sett.HistoBins)
+	rpc.cm.reconfig(rpc.osdIds, rpc.clusterName, rpc.latsCollectTimeout,
+		            sett.HistoMin, sett.HistoMax, sett.HistoBins)
 	return &Empty{}, nil
 }
 
 
 func (rpc *myRPCServer) StopLatencyMonitoring(context.Context, *Empty) (*Empty, error) {
-	if rpc.latsMonitor != nil {
+	if rpc.cm != nil {
 		log.Print("Stopping previous monitoring fibers")
-		rpc.latsMonitor.stop()
-		rpc.latsMonitor = nil
+		rpc.cm.stop()
+		rpc.cm = nil
 	}
 	return &Empty{}, nil
 }
@@ -82,7 +82,7 @@ func getNonzeroReg(arr []uint32) (int, int) {
 }
 
 func (rpc *myRPCServer) GetCephOpsLats(context.Context, *Empty) (*CephOpsLats, error) {
-	vls := rpc.latsMonitor.get()
+	vls := rpc.cm.get()
 	histo := make([]uint32, 0, 0)
 
 	rstart, rstop := getNonzeroReg(vls.rlats)
@@ -129,13 +129,13 @@ func (rpc *myRPCServer) GetCephInfo(ctx context.Context, clName *ClusterName) (*
 	return &CephInfo{Compressed: true, OsdDump: dumpz, OsdTree: treez}, nil
 }
 
-func newRPCServer(lm *latMonitor) *myRPCServer {
+func newRPCServer(cm *cephMonitor) *myRPCServer {
 	mrpc := &myRPCServer{}
-	mrpc.init(lm)
+	mrpc.init(cm)
 	return mrpc
 }
 
-func rpcServer(bindTo string, lm *latMonitor) {
+func rpcServer(bindTo string, cm *cephMonitor) {
 	ssok, err := net.Listen("tcp", bindTo)
 	if err != nil {
 		log.Fatal("Error in net.Listen: ", bindTo, err)
@@ -144,7 +144,7 @@ func rpcServer(bindTo string, lm *latMonitor) {
 	log.Print("Listening on ", bindTo)
 
 	grpcServer := grpc.NewServer()
-	mrpc := newRPCServer(lm)
+	mrpc := newRPCServer(cm)
 	RegisterSensorRPCServer(grpcServer, mrpc)
 	grpcServer.Serve(ssok)
 }

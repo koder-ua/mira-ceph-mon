@@ -4,7 +4,7 @@ After=multi-user.target
 
 [Service]
 Type=idle
-ExecStart=/usr/bin/mira-ceph-monitor -logfile /var/log/mira-ceph-monitor.log -silent -rpc 0.0.0.0:5678
+ExecStart=/usr/bin/mira-ceph-monitor -logfile /var/log/mira-ceph-monitor.log -silent -rpc 0.0.0.0:5678 -http 0.0.0.0:8062
 StandardOutput=null
 
 [Install]

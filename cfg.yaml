@@ -1,5 +1,5 @@
 cluster: ceph
-collect_time: 2
+collect_time: 10
 rpc_timeout: 5
 collect_threads: 32
 daemon_port: 5678

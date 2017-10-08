@@ -56,16 +56,20 @@ func main() {
 	}
 
 	log.Printf("Starting ceph monitoring routines")
-	lm := newLm()
+	cm := newCephMonitor()
 
 	if *rpcAddr != "" {
 		log.Printf("Starting rpc server at %s", *rpcAddr)
-		rpcServer(*rpcAddr, lm)
+		if *httpAddr != "" {
+			go rpcServer(*rpcAddr, cm)
+		} else {
+			rpcServer(*rpcAddr, cm)
+		}
 	}
 
 	if *httpAddr != "" {
 		log.Printf("Starting http server at %s", *httpAddr)
-		httpServe(*httpAddr, lm)
+		httpServer(*httpAddr, cm)
 	}
 
 	if *rpcAddr == "" {

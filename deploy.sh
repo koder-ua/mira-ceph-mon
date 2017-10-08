@@ -50,9 +50,27 @@ function deploy {
 }
 
 function show {
+    set +x
+    set +e
+
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    NC='\033[0m' # No Color
+
     for node in $NODES ; do
         SRV_STAT=$(ssh $node sudo systemctl status $SERVICE | grep Active)
-        echo $node " : " $SRV_STAT
+        if [[ $SRV_STAT == *" inactive "* ]]; then
+            printf "%-20s : %b %s %b\n" "$node" "$RED" "$SRV_STAT" "$NC"
+        else
+            printf "%-20s : %b %s %b\n" "$node" "$GREEN" "$SRV_STAT" "$NC"
+        fi
+    done
+}
+
+function stop {
+    set +x
+    for node in $NODES ; do
+        ssh $node sudo systemctl stop $SERVICE
     done
 }
 
@@ -73,7 +91,7 @@ function start {
 }
 
 set +x
-while getopts "rcdsut:S" opt; do
+while getopts "rcdsut:ST" opt; do
     case "$opt" in
     c)  clean
         ;;
@@ -90,6 +108,8 @@ while getopts "rcdsut:S" opt; do
     t)  tails $OPTARG
         ;;
     S)  start
+        ;;
+    T)  stop
         ;;
     esac
 done
