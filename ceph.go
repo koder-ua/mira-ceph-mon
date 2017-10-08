@@ -48,6 +48,7 @@ func parseCephHealth(cephSBt []byte) (*CephStatus, error) {
 	status.DataG = uint32(getJSONFieldFloat(cephS, "pgmap", "data_bytes") / GiB)
 	status.UsedG = uint32(getJSONFieldFloat(cephS, "pgmap", "bytes_used") / GiB)
 	status.FreeG = uint32(getJSONFieldFloat(cephS, "pgmap", "bytes_avail") / GiB)
+	status.OsdMapEpoch = uint32(getJSONFieldFloat(cephS, "osdmap", "osdmap", "epoch") + 0.5)
 
 	return &status, nil
 }
@@ -305,7 +306,6 @@ func latStorageFiber(latsListChan <-chan *cephLats, latsHistoChan chan<- *cephLa
 		case newData := <- latsListChan:
 			if newData == nil {
 				log.Printf("Stopping storage fiber")
-				close(latsHistoChan)
 				return
 			}
 			rhisto.update(newData.rlats)
@@ -370,3 +370,98 @@ func (lm *latMonitor) reconfig(osdIDS []int, cluster string, timeout int, min, m
 }
 
 
+func getCephInfo(cluster string) ([]byte, []byte, error) {
+	cmd := exec.Command("ceph", "osd", "tree", "--format", "json", "--cluster", cluster)
+	osdTree, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cmd = exec.Command("ceph", "osd", "dump", "--format", "json", "--cluster", cluster)
+	osdDump, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, nil, err
+	}
+	return  osdTree, osdDump, nil
+}
+
+
+func listOSDs(cluster string) (map[int]string, error) {
+	cmd := exec.Command("ceph", "osd", "dump", "--format", "json", "--cluster", cluster)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+
+	osdDump, err := parseJSON(out)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make(map[int]string)
+	for _, osdInfoI := range getJSONField(osdDump, "osds").([]interface{}) {
+		osdPublicAddr := osdInfoI.(map[string]interface{})["public_addr"].(string)
+		osdID := osdInfoI.(map[string]interface{})["osd"].(int)
+		res[osdID] = osdPublicAddr
+	}
+	return res, nil
+}
+
+type crushNode struct {
+	nodeType, name string
+	childrens []*crushNode
+}
+
+type crushNodeTmp struct {
+	nodeType, name string
+	id int
+	childrens []int
+}
+
+func parseOSDTree(cluster string) ([]*crushNode, error) {
+	cmd := exec.Command("ceph", "osd", "tree", "--format", "json", "--cluster", cluster)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+
+	osdDump, err := parseJSON(out)
+	if err != nil {
+		return nil, err
+	}
+
+	allNodes := make(map[int]*crushNodeTmp)
+
+	for _, nodeI := range getJSONField(osdDump, "nodes").([]interface{}) {
+		node := nodeI.(map[string]interface{})
+		nodeID := node["id"].(int)
+		nodeTypeName := node["type"].(string)
+		nodeName := node["name"].(string)
+		childrenI := node["children"].([]interface{})
+		cntmp := crushNodeTmp{nodeType: nodeTypeName, name: nodeName, id: nodeID,
+							  childrens: make([]int, len(childrenI))}
+		for idx, vl := range childrenI {
+			cntmp.childrens[idx] = vl.(int)
+		}
+		allNodes[cntmp.id] = &cntmp
+	}
+
+	resMap := make(map[int]*crushNode)
+
+	for _, nodeTmp := range allNodes {
+		node := crushNode{nodeType: nodeTmp.nodeType, name: nodeTmp.name,
+						  childrens: make([]*crushNode, len(nodeTmp.childrens))}
+		resMap[nodeTmp.id] = &node
+	}
+
+	resLst := make([]*crushNode, 0)
+	for nodeID, node := range resMap {
+		for idx, childID := range allNodes[nodeID].childrens {
+			node.childrens[idx] = resMap[childID]
+		}
+		resLst = append(resLst, node)
+	}
+
+
+	return resLst, nil
+}

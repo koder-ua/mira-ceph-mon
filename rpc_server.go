@@ -5,6 +5,8 @@ import (
 	"log"
 	"google.golang.org/grpc"
 	"golang.org/x/net/context"
+	"bytes"
+	"compress/gzip"
 )
 
 type myRPCServer struct {
@@ -89,8 +91,42 @@ func (rpc *myRPCServer) GetCephOpsLats(context.Context, *Empty) (*CephOpsLats, e
 	histo = append(histo, vls.rlats[rstart: rstop]...)
 	histo = append(histo, vls.wlats[wstart: wstop]...)
 
-	log.Printf("Len(histo) = %d, len(wlats) = %d, len(rlats) = %d", len(histo), rstop - rstart, wstop - wstart)
 	return &CephOpsLats{uint32(rstop - rstart),uint32(rstart), uint32(wstart), histo}, nil
+}
+
+
+func compress(data []byte) ([]byte, error) {
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+	if _, err := gz.Write(data); err != nil {
+		return nil, err
+	}
+	if err := gz.Flush(); err != nil {
+		return nil, err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+func (rpc *myRPCServer) GetCephInfo(ctx context.Context, clName *ClusterName) (*CephInfo, error) {
+	tree, dump, err := getCephInfo(clName.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	dumpz, err := compress(dump)
+	if err != nil {
+		return nil, err
+	}
+
+	treez, err := compress(tree)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CephInfo{Compressed: true, OsdDump: dumpz, OsdTree: treez}, nil
 }
 
 func newRPCServer(lm *latMonitor) *myRPCServer {

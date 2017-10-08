@@ -11,7 +11,8 @@ message CephStatus {
     uint32 WriteBPS = 6;
     uint32 ReadsPS = 7;
     uint32 WritesPS = 8;
-    repeated uint32 OsdLats = 9;
+    uint32 OsdMapEpoch = 9;
+    repeated uint32 OsdLats = 10;
 }
 
 message CephOpsLats {
@@ -19,6 +20,12 @@ message CephOpsLats {
     uint32 RSkipped = 2;
     uint32 WSkipped = 3;
     repeated uint32 LatHisto = 4;
+}
+
+message CephInfo {
+    bool Compressed = 1;
+    bytes OsdDump = 2;
+    bytes OsdTree = 3;
 }
 
 message CephSettings {
@@ -34,8 +41,13 @@ message CephSettings {
 
 message Empty{}
 
+message ClusterName {
+    string Name = 1;
+}
+
 service SensorRPC {
     rpc GetCephStatus(Empty) returns (CephStatus) {}
+    rpc GetCephInfo(ClusterName) returns (CephInfo) {}
 
     rpc SetupLatencyMonitoring(CephSettings) returns (Empty) {}
     rpc GetCephOpsLats(Empty) returns (CephOpsLats) {}

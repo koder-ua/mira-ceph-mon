@@ -55,7 +55,7 @@ func main() {
 		}
 	}
 
-	log.Printf("Starting ceph monitoring rutines")
+	log.Printf("Starting ceph monitoring routines")
 	lm := newLm()
 
 	if *rpcAddr != "" {

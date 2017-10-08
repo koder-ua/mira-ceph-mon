@@ -1,7 +1,9 @@
 import sys
 import dbm
+import json
 import time
 import math
+import gzip
 import logging
 import argparse
 import datetime
@@ -10,15 +12,14 @@ import functools
 import socketserver
 from http.server import SimpleHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Any, Tuple, Dict, Optional, Set
-from numpy.polynomial.chebyshev import chebfit, chebval
+from typing import List, Any, Tuple, Dict, Optional, Set, Union
 
 import pygal
 from pygal.style import DefaultStyle
-
 import grpc
 import yaml
 import numpy
+from numpy.polynomial.chebyshev import chebfit, chebval
 
 import stat_pb2
 import stat_pb2_grpc
@@ -42,11 +43,16 @@ def curr_hour() -> datetime.datetime:
 MaybeMonRpc = Optional[stat_pb2_grpc.SensorRPCStub]
 
 
-def init_rpc_mon(addr: str, config: Dict[str, Any]) -> MaybeMonRpc:
+DEFAULT_RPC_TIMEOUT = 5
+
+
+def init_rpc_mon(addr: str, config: Dict[str, Any], is_osd: bool) -> MaybeMonRpc:
+    rpc_timeout = config.get("rpc_timeout", DEFAULT_RPC_TIMEOUT)
+    logger.debug("Connecting to %s", addr)
     rpc = stat_pb2_grpc.SensorRPCStub(grpc.insecure_channel(addr))
     cluster = config['cluster']
-    ids = config['osds'][addr]
-    if ids:
+    if is_osd:
+        ids = config['osds'][addr]
         sett = stat_pb2.CephSettings(Cluster=cluster,
                                      OsdIDS=ids,
                                      HistorySize=config['history']['size'],
@@ -55,7 +61,9 @@ def init_rpc_mon(addr: str, config: Dict[str, Any]) -> MaybeMonRpc:
                                      HistoMin=config['histogram']['min'],
                                      HistoMax=config['histogram']['max'],
                                      HistoBins=config['histogram']['bins'])
-        rpc.SetupLatencyMonitoring(sett)
+
+        logger.debug("SetupLatencyMonitoring %s with osds=%r", addr, ids)
+        rpc.SetupLatencyMonitoring(sett, timeout=rpc_timeout)
     return rpc
 
 
@@ -122,17 +130,19 @@ def get_perc_from_histo(bins: numpy.ndarray, bin_vals: numpy.ndarray,
     return bin_vals[pos]
 
 
-def coll_func(addr_rpc: Tuple[str, MaybeMonRpc], config: Dict[str, Any]) \
+def latency_coll_func(addr_rpc: Tuple[str, MaybeMonRpc], config: Dict[str, Any]) \
                         -> Tuple[MaybeMonRpc, str, Optional[stat_pb2.CephOpsLats]]:
+    rpc_timeout = config.get("rpc_timeout", DEFAULT_RPC_TIMEOUT)
     addr, rpc = addr_rpc
     try:
         if rpc is None:
-            rpc = init_rpc_mon(addr, config)
+            logger.error("Reiniting osd rpc to %s", addr)
+            rpc = init_rpc_mon(addr, config, True)
     except Exception as exc:
         logger.error("During reconnect to %s: %s", addr, exc)
     else:
         try:
-            return rpc, addr, rpc.GetCephOpsLats(stat_pb2.Empty())
+            return rpc, addr, rpc.GetCephOpsLats(stat_pb2.Empty(), timeout=rpc_timeout)
         except Exception as exc:
             logger.error("During GetCephOpsLats from %s: %s", addr, exc)
             # close connection, will reconnect next time
@@ -141,18 +151,40 @@ def coll_func(addr_rpc: Tuple[str, MaybeMonRpc], config: Dict[str, Any]) \
     return rpc, addr, None
 
 
-def primary_info(prim_rpcs: Dict[str, MaybeMonRpc], config: Dict[str, Any]) -> Optional[stat_pb2.CephStatus]:
+def cluster_info(prim_rpcs: Dict[str, MaybeMonRpc], config: Dict[str, Any]) -> Optional[stat_pb2.CephStatus]:
+    rpc_timeout = config.get("rpc_timeout", DEFAULT_RPC_TIMEOUT)
     for addr, prim_rpc in list(prim_rpcs.items()):
         if prim_rpc is None:
-            prim_rpc = prim_rpcs[addr] = init_rpc_mon(addr, config)
+            prim_rpc = prim_rpcs[addr] = init_rpc_mon(addr, config, False)
 
         try:
-            return prim_rpc.GetCephStatus(stat_pb2.Empty())
+            return prim_rpc.GetCephStatus(stat_pb2.Empty(), timeout=rpc_timeout)
         except Exception as exc:
             logger.error("During GetCephStatus from %s, %s", addr, exc)
             prim_rpcs[addr] = None
 
     return None
+
+
+def osdmap_info(prim_rpcs: Dict[str, MaybeMonRpc], config: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    rpc_timeout = config.get("rpc_timeout", DEFAULT_RPC_TIMEOUT)
+    for addr, prim_rpc in list(prim_rpcs.items()):
+        if prim_rpc is None:
+            prim_rpc = prim_rpcs[addr] = init_rpc_mon(addr, config, False)
+
+        try:
+            res = prim_rpc.GetCephInfo(stat_pb2.Empty(), timeout=rpc_timeout)
+        except Exception as exc:
+            logger.error("During GetCephStatus from %s, %s", addr, exc)
+            prim_rpcs[addr] = None
+            continue
+
+        if res.Compressed:
+            return gzip.decompress(res.OsdDump).decode("utf8"), gzip.decompress(res.OsdTree).decode("utf8")
+        else:
+            return res.OsdDump, res.OsdTree
+
+    return None, None
 
 
 graph_dict_lock = threading.Lock()
@@ -170,111 +202,257 @@ class PlotParams:
         self.update_each = update_each
 
 
-def load_cycle(prim_rpcs: Dict[str, MaybeMonRpc], osd_rpc: Dict[str, MaybeMonRpc],
-               config: Dict[str, Any], storage: Storage) -> None:
+def collect_lats_histos(config: Dict[str, Any],
+                        pool: ThreadPoolExecutor,
+                        osd_rpc: Dict[str, MaybeMonRpc]) -> Tuple[numpy.ndarray, numpy.ndarray]:
+
     empty_histo = lambda: numpy.zeros(config['histogram']['bins'], dtype=numpy.uint32)
-    coll_func_cl = functools.partial(coll_func, config=config)
-    plot_percentiles = numpy.array(config.get('plots', {}).get('percentiles', [50, 95, 99]), dtype=float) / 100
-    # last_time_failed = set()  # type: Set[str]
+    raggregated = empty_histo()
+    waggregated = empty_histo()
+    coll_func_cl = functools.partial(latency_coll_func, config=config)
 
-    min_log = math.log10(config['histogram']['min'])
-    max_log = math.log10(config['histogram']['max'])
-    bin_vals = numpy.logspace(min_log, max_log, config['histogram']['bins'], base=10.0)
+    failed = set()  # type: Set[str]
+    ok_count = 0
+    for rpc, addr, olat in pool.map(coll_func_cl, list(osd_rpc.items())):
+        osd_rpc[addr] = rpc
+        if olat is None:
+            failed.add(addr)
+            continue
 
-    # recalculate percentiles
-    percentiles_dct = {}
-    logger.info("Reloading percentiles")
-    for name, vals_dct in storage.data.items():
-        percentiles_dct[name] = {}
-        # update percentiles
-        for key, arrs in vals_dct.items():
-            percentiles_dct[name][key] = tuple(get_perc_from_histo(arr, bin_vals, plot_percentiles)
-                                               for arr in arrs)
+        ok_count += 1
+        osd_data = list(olat.LatHisto)
+        read_arr = empty_histo()
+        read_arr[olat.RSkipped: olat.RSkipped + olat.RSize] = osd_data[:olat.RSize]
+        write_arr = empty_histo()
+        wdata = osd_data[olat.RSize:]
+        write_arr[olat.WSkipped: olat.WSkipped + len(wdata)] = wdata
 
-    logger.info("Start monitoring")
-    cthreads = min(config.get('collect_threads', 16), len(osd_rpc) + 1)
-    logger.info("Spawn %d date collecting threads", cthreads)
-    with ThreadPoolExecutor(cthreads) as pool:
-        while True:
-            collect_start_time = time.time()
-            raggregated = empty_histo()
-            waggregated = empty_histo()
-            logger.debug("New scan cycle")
-            prim_update_ft = pool.submit(primary_info, prim_rpcs, config)
+        raggregated += read_arr
+        waggregated += write_arr
 
-            failed = set()  # type: Set[str]
-            ok_count = 0
-            for rpc, addr, olat in pool.map(coll_func_cl, list(osd_rpc.items())):
-                osd_rpc[addr] = rpc
-                if olat is None:
-                    failed.add(addr)
+    logger.debug("Get %d correct latency responces from OSD's monitors", ok_count)
+    return raggregated, waggregated
+
+
+def update_database(storage: Storage,
+                    raggregated:numpy.ndarray,
+                    waggregated: numpy.ndarray,
+                    plots: List[Any],
+                    curr_time: int) -> Tuple[List[Tuple[str, int]], List[Tuple[str, int]]]:
+    removed_keys = []  # type: List[Tuple[str, int]]
+    updated_keys = []  # type: List[Tuple[str, int]]
+    for plt_info in plots:
+        curr_arr_key = curr_time - (curr_time % plt_info.step)
+        dct = storage.data[plt_info.name]
+        if curr_arr_key not in dct:
+            dct[curr_arr_key] = (raggregated, waggregated)
+
+            # remove last if needed
+            for rm_key in [evt_tm for evt_tm in dct if (evt_tm - curr_time) >= plt_info.interval]:
+                storage.rm(plt_info.name, rm_key)
+                removed_keys.append((plt_info.name, rm_key))
+        else:
+            dct[curr_arr_key] = (dct[curr_arr_key][0] + raggregated, dct[curr_arr_key][1] + waggregated)
+            storage.sync_key(plt_info.name, curr_arr_key)
+
+        updated_keys.append((plt_info.name, curr_arr_key))
+
+    storage.sync_db()
+    return updated_keys, removed_keys
+
+
+def get_osd_hosts(osd_map: str, use_public: bool = True) -> Dict[str, List[int]]:
+    key = "public_addr" if use_public else "cluster_addr"
+    res = {}  # type: Dict[str, List[int]]
+    for osd_info in json.loads(osd_map)['osds']:
+        addr = osd_info[key].split(":")[0]
+        res.setdefault(addr, []).append(osd_info['osd'])
+    return res
+
+
+class OSDTreeItem:
+    def __init__(self, tp: str, name: str, iid: int, children: List[int]) -> None:
+        self.tp = tp
+        self.name = name
+        self.iid = iid
+        self.children = children
+
+
+def osds_for_roots(osd_tree: str) -> Dict[int, str]:
+    nodes = {}  # type: Dict[int, OSDTreeItem]
+    all_childs = set()  # type: Set[int]
+    for node in json.loads(osd_tree)['nodes']:
+        ti = OSDTreeItem(tp=node['type'], name=node['name'], iid=node['id'], children=node.get('children', []))
+        nodes[ti.iid] = ti
+        all_childs.update(node.get('children', []))
+
+    roots = {}  # type: Dict[int, str]
+    for root_node_iid in set(nodes) - all_childs:
+        # find all osd's in this tree
+        curr_nodes = set()
+        new_curr = {root_node_iid}
+        while curr_nodes != new_curr:
+            curr_nodes = new_curr
+            new_curr = set()
+            for node_iid in curr_nodes:
+                if not nodes[node_iid].children:
+                    new_curr.add(node_iid)
+                else:
+                    new_curr.update(nodes[node_iid].children)
+
+        assert all(nodes[iid].tp == 'osd' for iid in new_curr)
+        root_name = nodes[root_node_iid].name
+        for iid in new_curr:
+            roots[iid] = root_name
+
+    return roots
+
+
+def update_cfg_with_osds_for_nodes(config: Dict[str, Any], mon_rpcs: Dict[str, MaybeMonRpc]):
+    osds_config = config['osds']
+    daemon_port = config.get("daemon_port", 5678)
+
+    if 'osd_per_node' not in osds_config:
+        return osds_config
+
+    assert len(osds_config) == 1
+    osd_per_node = osds_config['osd_per_node']
+    assert isinstance(osd_per_node, int) or osd_per_node == 'all'
+
+    osd_map, osd_tree = osdmap_info(mon_rpcs, config)
+    if osd_map is None or osd_tree is None:
+        logger.error("Failed to get osd map or tree")
+        raise RuntimeError("Failed to get osd map or tree")
+
+    roots4osd = osds_for_roots(osd_tree)
+    roots = list(set(roots4osd.values()))
+    if not roots:
+        logger.error("Not found any crush root")
+        raise RuntimeError("Not found any crush root")
+
+    if len(roots) > 1:
+        if "crush_root" not in config:
+            logger.error("Need to set active crush root from %s in config via 'crush_root' option", ",".join(roots))
+            raise RuntimeError("Need to set active crush root in config")
+        active_root = config["crush_root"]
+    else:
+        active_root = roots[0]
+
+    logger.debug("Using root %s", active_root)
+    osds_for_nodes = {}  # type: Dict[str, Dict[str, List[int]]]
+    for addr, osd_iids in get_osd_hosts(osd_map).items():
+        osds_for_nodes[addr] = {}
+        for osd_iid in osd_iids:
+            osds_for_nodes[addr].setdefault(roots4osd[osd_iid], []).append(osd_iid)
+
+    # select particular osd for monitoring
+    osds_config = {}  # type: Dict[str, List[int]]
+    for addr, osds_for_all_roots in osds_for_nodes.items():
+        osds = osds_for_all_roots.get(active_root, [])
+        rpc_addr = "{}:{}".format(addr, daemon_port)
+        if osd_per_node == 'all':
+            # need to select up to osd_per_node osd's from different roots
+            osds_config[rpc_addr] = osds
+        else:
+            osds_config[rpc_addr] = osds[:osd_per_node]
+
+    osd_configs_s = ['    "{}": [{}]'.format(addr, ",".join(map(str, osd_iids)))
+                     for addr, osd_iids in sorted(osds_config.items())]
+    logger.debug("Detected nodes configs:")
+    for line in osd_configs_s:
+        logger.debug(line)
+    config['osds'] = osds_config
+
+
+def load_cycle(config: Dict[str, Any], storage: Storage) -> None:
+    osd_rpc = {}
+    monitors_rpc = {addr: None for addr in config['mons']}  # type: Dict[str, MaybeMonRpc]
+
+    try:
+        plot_percentiles = numpy.array(config.get('plots', {}).get('percentiles', [50, 95, 99]), dtype=float) / 100
+
+        min_log = math.log10(config['histogram']['min'])
+        max_log = math.log10(config['histogram']['max'])
+        bin_vals = numpy.logspace(min_log, max_log, config['histogram']['bins'], base=10.0)
+
+        # calculate percentiles for historic data from database
+        percentiles_dct = {}
+        logger.info("Recalculating percentiles for historic data")
+        for name, vals_dct in storage.data.items():
+            percentiles_dct[name] = {}
+            # update percentiles
+            for key, arrs in vals_dct.items():
+                percentiles_dct[name][key] = tuple(get_perc_from_histo(arr, bin_vals, plot_percentiles)
+                                                   for arr in arrs)
+
+        logger.info("Start monitoring")
+        cthreads = config.get('collect_threads', 16)
+        logger.info("Spawning %d data collection threads", cthreads)
+
+        update_cfg_with_osds_for_nodes(config, monitors_rpc)
+        osd_rpc = {addr: None for addr in config['osds']}
+
+        with ThreadPoolExecutor(cthreads) as pool:
+            while True:
+                logger.debug("New scan cycle")
+                collect_start_time = time.time()
+
+                # get ceph health info
+                info_ft = pool.submit(cluster_info, monitors_rpc, config)
+
+                raggregated, waggregated = collect_lats_histos(config, pool, osd_rpc)
+
+                info  = info_ft.result()
+                if info is None:
+                    logger.error("Failed to get cluster health status")
                     continue
 
-                ok_count += 1
-                osd_data = list(olat.LatHisto)
-                read_arr = empty_histo()
-                read_arr[olat.RSkipped: olat.RSkipped + olat.RSize] = osd_data[:olat.RSize]
-                write_arr = empty_histo()
-                wdata = osd_data[olat.RSize:]
-                write_arr[olat.WSkipped: olat.WSkipped + len(wdata)] = wdata
+                curr_time = int(time.time())
 
-                raggregated += read_arr
-                waggregated += write_arr
-
-            logger.debug("Get %d correct responces", ok_count)
-            # last_time_failed = failed
-            cluster_info = prim_update_ft.result()
-
-            if not cluster_info:
-                logger.warning("Fail to get cluster info")
-            else:
-                logger.debug("Get cluster info")
-
-            ctime = int(time.time())
-            for plt_info in config['plots']['plots']:
-                curr_arr_key = ctime - (ctime % plt_info.step)
-                dct = storage.data[plt_info.name]
-                if curr_arr_key not in dct:
-                    dct[curr_arr_key] = (raggregated, waggregated)
-
-                    # remove last if needed
-                    for rm_key in [evt_tm for evt_tm in dct if (evt_tm - ctime) >= plt_info.interval]:
-                        storage.rm(plt_info.name, rm_key)
-                        del percentiles_dct[plt_info.name][rm_key]
-                else:
-                    dct[curr_arr_key] = (dct[curr_arr_key][0] + raggregated, dct[curr_arr_key][1] + waggregated)
-                    storage.sync_key(plt_info.name, curr_arr_key)
+                # update database
+                updated_keys, removed_keys = update_database(storage, raggregated, waggregated,
+                                                             config['plots']['plots'], curr_time)
 
                 # update percentiles
-                percentiles_dct[plt_info.name][curr_arr_key] = \
-                        tuple(get_perc_from_histo(arr, bin_vals, plot_percentiles) for arr in dct[curr_arr_key])
+                for name, iid in removed_keys:
+                    del percentiles_dct[name][iid]
 
-            storage.sync_db()
-            t = time.time()
-            ct = int(t)
+                for name, iid in updated_keys:
+                    percentiles_dct[name][iid] = tuple(get_perc_from_histo(arr, bin_vals, plot_percentiles)
+                                                       for arr in storage.data[name][iid])
 
-            for plt_info in config['plots']['plots']:
-                with graph_dict_lock:
-                    prev_time, _ = graph_dict.get((plt_info.name, "read"), (0, None))
+                # update plots
+                plot_start_time = time.time()
+                for plt_info in config['plots']['plots']:
+                    with graph_dict_lock:
+                        prev_time, _ = graph_dict.get((plt_info.name, "read"), (0, None))
 
-                if prev_time + plt_info.update_each < ct:
-                    logger.info("Replotting %s", plt_info.name)
-                    plot_graph(ct=ct,
-                               data=percentiles_dct[plt_info.name],
-                               plot_percentiles=plot_percentiles,
-                               caption=plt_info.name,
-                               ctime=ctime - (ctime % plt_info.step),
-                               interval=plt_info.interval,
-                               step=plt_info.step,
-                               label_step=plt_info.label_step,
-                               strftime_fmt=plt_info.strftime_fmt,
-                               is_dots=config.get('plots', {}).get('dots', True),
-                               curved_coef=config.get('plots', {}).get('curved_coef', 3))
+                    if prev_time + plt_info.update_each < curr_time:
+                        logger.debug("Replotting %s", plt_info.name)
+                        plot_graph(ct=curr_time,
+                                   data=percentiles_dct[plt_info.name],
+                                   plot_percentiles=plot_percentiles,
+                                   caption=plt_info.name,
+                                   ctime=curr_time - (curr_time % plt_info.step),
+                                   interval=plt_info.interval,
+                                   step=plt_info.step,
+                                   label_step=plt_info.label_step,
+                                   strftime_fmt=plt_info.strftime_fmt,
+                                   is_dots=config.get('plots', {}).get('dots', True),
+                                   curved_coef=config.get('plots', {}).get('curved_coef', 3))
 
-            logger.debug("Rendering takes %.1f seconds", time.time() - t)
-            sleep_time = config['collect_time'] - (time.time() - collect_start_time)
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+                logger.debug("Rendering takes %.1f seconds", time.time() - plot_start_time)
+
+                sleep_time = config['collect_time'] - (time.time() - collect_start_time)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+    finally:
+        for rpc in list(osd_rpc.values()) + list(monitors_rpc.values()):
+            try:
+                if rpc:
+                    rpc.Stop(stat_pb2.Empty())
+            except:
+                pass
 
 
 def approximate_curve(x: numpy.ndarray, y: numpy.ndarray, xnew: numpy.ndarray, curved_coef: int) -> numpy.ndarray:
@@ -389,7 +567,7 @@ def http_thread(config: Dict[str, Any]):
             self.send_response(404)
             self.end_headers()
 
-    port = 8062
+    port = 8061
     httpd = socketserver.TCPServer(('localhost', port), MyRequestHandler)
     httpd.allow_reuse_address = True
     logger.info("Http server listened on http://%s:%s", 'localhost', port)
@@ -400,29 +578,13 @@ def main(argv: List[str]) -> int:
     args = parse_args(argv[1:])
     config = yaml.load(open(args.config))
     config['plots']['plots'] = [PlotParams(*dt) for dt in config['plots']['plots']]
-    prim_rpcs = {}
-    osd_rpc = {}
-
-    for addr, osd_ids in config['osds'].items():
-        if not osd_ids:
-            prim_rpcs[addr] = None
-        else:
-            osd_rpc[addr] = None
 
     http_th = threading.Thread(target=http_thread, args=(config,))
     http_th.daemon = True
     http_th.start()
 
     storage = Storage(config)
-    try:
-        load_cycle(prim_rpcs, osd_rpc, config, storage)
-    finally:
-        for rpc in list(osd_rpc.values()) + list(prim_rpcs.values()):
-            try:
-                if rpc:
-                    rpc.Stop(stat_pb2.Empty())
-            except:
-                pass
+    load_cycle(config, storage)
     return 0
 
 if __name__ == "__main__":

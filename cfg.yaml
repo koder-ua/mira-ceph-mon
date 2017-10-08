@@ -1,6 +1,9 @@
 cluster: ceph
 collect_time: 2
+rpc_timeout: 5
 collect_threads: 32
+daemon_port: 5678
+crush_root: default2
 
 history:
     time: 1
@@ -25,9 +28,13 @@ plots:
     - ["1 day",       86400,      600,      3600,         "%H",        600]
     - ["6 month",  15552000,     7200,    864000,         "%D",      21600]
 
+
+mons: ["ceph-mon:5678"]
 osds:
-    "ceph-osd0:5678": [2]
-    "ceph-osd1:5678": [0]
-    "ceph-osd2:5678": [1]
-    "ceph-osd3:5678": [3]
-    "ceph-mon:5678": []
+    osd_per_node: all
+
+#osds:
+#    "ceph-osd0:5678": [2]
+#    "ceph-osd1:5678": [0]
+#    "ceph-osd2:5678": [1]
+#    "ceph-osd3:5678": [3]
