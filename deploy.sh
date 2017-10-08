@@ -50,7 +50,6 @@ function deploy {
 }
 
 function show {
-    set +x
     for node in $NODES ; do
         SRV_STAT=$(ssh $node sudo systemctl status $SERVICE | grep Active)
         echo $node " : " $SRV_STAT
@@ -66,8 +65,15 @@ function tails {
     done
 }
 
+function start {
+    set -x
+    for node in $NODES ; do
+        ssh $node sudo systemctl start $SERVICE
+    done
+}
+
 set +x
-while getopts "rcdsut:" opt; do
+while getopts "rcdsut:S" opt; do
     case "$opt" in
     c)  clean
         ;;
@@ -82,6 +88,8 @@ while getopts "rcdsut:" opt; do
     s)  show
         ;;
     t)  tails $OPTARG
+        ;;
+    S)  start
         ;;
     esac
 done

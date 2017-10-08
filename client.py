@@ -29,12 +29,6 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger()
 
 
-def parse_args(args: List[str]) -> Any:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("config", help="YAML config file")
-    return parser.parse_args(args)
-
-
 def curr_hour() -> datetime.datetime:
     cd = datetime.datetime.now()
     return datetime.datetime(cd.year, cd.month, cd.day, cd.hour)
@@ -567,11 +561,18 @@ def http_thread(config: Dict[str, Any]):
             self.send_response(404)
             self.end_headers()
 
-    port = 8061
-    httpd = socketserver.TCPServer(('localhost', port), MyRequestHandler)
-    httpd.allow_reuse_address = True
-    logger.info("Http server listened on http://%s:%s", 'localhost', port)
+    ip, port = config.get('http', 'localhost:8061').split(":")
+    port = int(port)
+    socketserver.TCPServer.allow_reuse_address = True
+    httpd = socketserver.TCPServer((ip, port), MyRequestHandler)
+    logger.info("Http server listened on http://%s:%s", ip, port)
     httpd.serve_forever()
+
+
+def parse_args(args: List[str]) -> Any:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config", help="YAML config file")
+    return parser.parse_args(args)
 
 
 def main(argv: List[str]) -> int:

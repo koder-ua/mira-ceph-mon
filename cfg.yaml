@@ -4,6 +4,7 @@ rpc_timeout: 5
 collect_threads: 32
 daemon_port: 5678
 crush_root: default2
+http: 0.0.0.0:8061
 
 history:
     time: 1
