@@ -9,10 +9,8 @@ import (
 )
 
 func main() {
-	clusterName := flag.String("cluster", "ceph", "Set cluster name (ceph by default)")
 	rpcAddr := flag.String("rpc", "", "Addr for grpc server")
 	httpAddr := flag.String("http", "", "Addr for http server")
-	osdID := flag.Int("osdid", -1, "OSD id")
 	logFile := flag.String("logfile", "", "Store logs to file FILE")
 	isSilent := flag.Bool("silent", false, "Don't log to stdout")
 	ignoreNonRoot := flag.Bool("ignorenonroot", false, "Don't fail if start not under root")
@@ -56,34 +54,25 @@ func main() {
 	}
 
 	log.Printf("Starting ceph monitoring routines")
-	cm := newCephMonitor()
 
-	if *rpcAddr != "" {
-		log.Printf("Starting rpc server at %s", *rpcAddr)
-		if *httpAddr != "" {
-			go rpcServer(*rpcAddr, cm)
-		} else {
-			rpcServer(*rpcAddr, cm)
-		}
+	if *rpcAddr == "" && *httpAddr == "" {
+		log.Fatal("Either rpc or http addr need to be passed")
+	}
+	if *httpAddr != "" {
+		log.Printf("Starting http server at %s", *httpAddr)
 	}
 
 	if *httpAddr != "" {
-		log.Printf("Starting http server at %s", *httpAddr)
-		httpServer(*httpAddr, cm)
+		log.Printf("Starting rpc server at %s", *rpcAddr)
 	}
 
-	if *rpcAddr == "" {
-		log.Print("Parsing historic ops for osd ", *osdID)
-		lats, err := getLatList(*osdID, *clusterName, &map[string]bool{})
-		if err != nil {
-			log.Fatal("Failed to get lat list ", err)
-		}
-		log.Print(lats)
+	cm := newCephMonitor()
+	if *rpcAddr != "" && *httpAddr != "" {
+		go httpServer(*httpAddr, cm)
+		rpcServer(*rpcAddr, cm)
+	} else if *rpcAddr != "" {
+		rpcServer(*rpcAddr, cm)
 	} else {
-		stat, err := getCephStatus(*clusterName)
-		if err != nil {
-			log.Fatal("Failed to get ceph status ", err)
-		}
-		log.Print(stat)
+		httpServer(*httpAddr, cm)
 	}
 }

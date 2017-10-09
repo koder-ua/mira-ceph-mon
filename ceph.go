@@ -96,6 +96,7 @@ func (cm *cephMonitor) stop() {
 	if cm.running {
 		close(cm.quit)
 		cm.wg.Wait()
+		cm.quit = nil
 		cm.running = false
 		log.Printf("All ceph bg fibers stopped")
 	}

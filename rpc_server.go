@@ -18,10 +18,6 @@ type myRPCServer struct {
 	cm                 *cephMonitor
 }
 
-func (rpc *myRPCServer) init(cm *cephMonitor) {
-	rpc.cm = cm
-}
-
 func (rpc *myRPCServer) SetupLatencyMonitoring(ctx context.Context, sett *CephSettings) (*Empty, error) {
 	log.Printf("Get new config %v", *sett)
 	rpc.clusterName = sett.Cluster
@@ -47,10 +43,9 @@ func (rpc *myRPCServer) SetupLatencyMonitoring(ctx context.Context, sett *CephSe
 
 
 func (rpc *myRPCServer) StopLatencyMonitoring(context.Context, *Empty) (*Empty, error) {
-	if rpc.cm != nil {
+	if rpc.cm.running {
 		log.Print("Stopping previous monitoring fibers")
 		rpc.cm.stop()
-		rpc.cm = nil
 	}
 	return &Empty{}, nil
 }
@@ -129,22 +124,16 @@ func (rpc *myRPCServer) GetCephInfo(ctx context.Context, clName *ClusterName) (*
 	return &CephInfo{Compressed: true, OsdDump: dumpz, OsdTree: treez}, nil
 }
 
-func newRPCServer(cm *cephMonitor) *myRPCServer {
-	mrpc := &myRPCServer{}
-	mrpc.init(cm)
-	return mrpc
-}
-
 func rpcServer(bindTo string, cm *cephMonitor) {
 	ssok, err := net.Listen("tcp", bindTo)
 	if err != nil {
 		log.Fatal("Error in net.Listen: ", bindTo, err)
 	}
+
 	defer ssok.Close()
 	log.Print("Listening on ", bindTo)
 
 	grpcServer := grpc.NewServer()
-	mrpc := newRPCServer(cm)
-	RegisterSensorRPCServer(grpcServer, mrpc)
+	RegisterSensorRPCServer(grpcServer, &myRPCServer{cm: cm})
 	grpcServer.Serve(ssok)
 }
