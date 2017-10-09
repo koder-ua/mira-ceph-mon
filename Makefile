@@ -1,4 +1,4 @@
-.PHONY : all clean proto lint bz2
+.PHONY : all clean proto lint bz2 unbz
 PROG = bin/monitor
 GPATH = /home/koder/go
 PROTO_FILES = $(wildcard *.proto)
@@ -15,8 +15,12 @@ $(PROG): *.go $(GO_PB_FILES) Makefile
 	env GOPATH=$(GPATH) go build -o $(PROG)
 
 bz2:
-	rm -f $(PROG).bz2
+	-rm -f $(PROG).bz2
 	bzip2 -z -k -9 $(PROG)
+
+unbz:
+	-rm -f $(PROG)
+	bzip2 -d -k $(PROG).bz2
 
 proto: $(GO_PB_FILES) $(PY_PB_FILES)
 
