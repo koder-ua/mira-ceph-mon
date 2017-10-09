@@ -44,8 +44,8 @@ def init_rpc_mon(addr: str, config: Dict[str, Any], is_osd: bool) -> MaybeMonRpc
     rpc_timeout = config.get("rpc_timeout", DEFAULT_RPC_TIMEOUT)
     logger.debug("Connecting to %s", addr)
     rpc = stat_pb2_grpc.SensorRPCStub(grpc.insecure_channel(addr))
-    cluster = config['cluster']
     if is_osd:
+        cluster = config['cluster']
         ids = config['osds'][addr]
         sett = stat_pb2.CephSettings(Cluster=cluster,
                                      OsdIDS=ids,
@@ -122,6 +122,15 @@ def get_perc_from_histo(bins: numpy.ndarray, bin_vals: numpy.ndarray,
     pos = pos.clip(0, len(bin_vals) - 1)
 
     return bin_vals[pos]
+
+
+def pooling_stop_function(addr: str, config: Dict[str, Any]) -> None:
+    rpc_timeout = config.get("rpc_timeout", DEFAULT_RPC_TIMEOUT)
+    try:
+        rpc = init_rpc_mon(addr, config, False)
+        rpc.StopLatencyMonitoring(stat_pb2.Empty(), timeout=rpc_timeout)
+    except Exception as exc:
+        logger.error("During reconnect/stop %s: %s", addr, exc)
 
 
 def latency_coll_func(addr_rpc: Tuple[str, MaybeMonRpc], config: Dict[str, Any]) \
@@ -358,35 +367,39 @@ def update_cfg_with_osds_for_nodes(config: Dict[str, Any], mon_rpcs: Dict[str, M
     config['osds'] = osds_config
 
 
-def load_cycle(config: Dict[str, Any], storage: Storage) -> None:
+def load_cycle(config: Dict[str, Any], storage: Storage, stop: bool = False) -> None:
     osd_rpc = {}
     monitors_rpc = {addr: None for addr in config['mons']}  # type: Dict[str, MaybeMonRpc]
 
     try:
-        plot_percentiles = numpy.array(config.get('plots', {}).get('percentiles', [50, 95, 99]), dtype=float) / 100
-
-        min_log = math.log10(config['histogram']['min'])
-        max_log = math.log10(config['histogram']['max'])
-        bin_vals = numpy.logspace(min_log, max_log, config['histogram']['bins'], base=10.0)
-
-        # calculate percentiles for historic data from database
-        percentiles_dct = {}
-        logger.info("Recalculating percentiles for historic data")
-        for name, vals_dct in storage.data.items():
-            percentiles_dct[name] = {}
-            # update percentiles
-            for key, arrs in vals_dct.items():
-                percentiles_dct[name][key] = tuple(get_perc_from_histo(arr, bin_vals, plot_percentiles)
-                                                   for arr in arrs)
-
-        logger.info("Start monitoring")
         cthreads = config.get('collect_threads', 16)
-        logger.info("Spawning %d data collection threads", cthreads)
-
-        update_cfg_with_osds_for_nodes(config, monitors_rpc)
-        osd_rpc = {addr: None for addr in config['osds']}
-
         with ThreadPoolExecutor(cthreads) as pool:
+            logger.info("Spawning %d data collection threads", cthreads)
+            update_cfg_with_osds_for_nodes(config, monitors_rpc)
+            osd_rpc = {addr: None for addr in config['osds']}
+
+            if stop:
+                list(pool.map(functools.partial(pooling_stop_function, config=config), osd_rpc))
+                return
+
+            plot_percentiles = numpy.array(config.get('plots', {}).get('percentiles', [50, 95, 99]), dtype=float) / 100
+
+            min_log = math.log10(config['histogram']['min'])
+            max_log = math.log10(config['histogram']['max'])
+            bin_vals = numpy.logspace(min_log, max_log, config['histogram']['bins'], base=10.0)
+
+            # calculate percentiles for historic data from database
+            percentiles_dct = {}
+            logger.info("Recalculating percentiles for historic data")
+            for name, vals_dct in storage.data.items():
+                percentiles_dct[name] = {}
+                # update percentiles
+                for key, arrs in vals_dct.items():
+                    percentiles_dct[name][key] = tuple(get_perc_from_histo(arr, bin_vals, plot_percentiles)
+                                                       for arr in arrs)
+
+            logger.info("Start monitoring")
+
             while True:
                 logger.debug("New scan cycle")
                 collect_start_time = time.time()
@@ -445,7 +458,7 @@ def load_cycle(config: Dict[str, Any], storage: Storage) -> None:
         for rpc in list(osd_rpc.values()) + list(monitors_rpc.values()):
             try:
                 if rpc:
-                    rpc.Stop(stat_pb2.Empty())
+                    rpc.StopLatencyMonitoring(stat_pb2.Empty())
             except:
                 pass
 
@@ -573,20 +586,24 @@ def http_thread(config: Dict[str, Any]):
 def parse_args(args: List[str]) -> Any:
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="YAML config file")
+    parser.add_argument("--stop-monitoring", action='store_true', help="Stop ceph pooling on rpc nodes")
     return parser.parse_args(args)
 
 
 def main(argv: List[str]) -> int:
     args = parse_args(argv[1:])
     config = yaml.load(open(args.config))
-    config['plots']['plots'] = [PlotParams(*dt) for dt in config['plots']['plots']]
 
-    http_th = threading.Thread(target=http_thread, args=(config,))
-    http_th.daemon = True
-    http_th.start()
+    if not args.stop_monitoring:
+        config['plots']['plots'] = [PlotParams(*dt) for dt in config['plots']['plots']]
+        http_th = threading.Thread(target=http_thread, args=(config,))
+        http_th.daemon = True
+        http_th.start()
+        storage = Storage(config)
+    else:
+        storage = None
 
-    storage = Storage(config)
-    load_cycle(config, storage)
+    load_cycle(config, storage, args.stop_monitoring)
     return 0
 
 if __name__ == "__main__":
