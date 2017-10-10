@@ -1,4 +1,4 @@
-.PHONY : all clean proto lint bz2 unbz
+.PHONY : all clean proto lint bz2 unbz prepare
 PROG = bin/monitor
 GPATH = /home/koder/go
 PROTO_FILES = $(wildcard *.proto)

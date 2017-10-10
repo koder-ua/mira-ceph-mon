@@ -80,16 +80,20 @@ func (cm *cephMonitor) start(osdIDS []int, cluster string, timeout int, min, max
 func (cm *cephMonitor) statusMonitoringFiber(statProxyChan chan<- *CephStatus) {
 	log.Printf("Status monitoring fiber started")
 	defer cm.wg.Done()
+	defer close(statProxyChan)
+	tk := time.NewTicker(time.Duration(cm.timeout) * time.Second)
+	defer tk.Stop()
+
 	for {
+		log.Printf("Getting new ceph status")
+		stat, _ := getCephStatus(cm.cluster)
+		statProxyChan <- stat
+
 		select{
 		case <- cm.quit:
 			log.Printf("Status monitoring fiber stopped due to quit channel closed")
-			close(statProxyChan)
 			return
-		case <- time.After(time.Second * time.Duration(cm.timeout)):
-			log.Printf("Getting new ceph status")
-			stat, _ := getCephStatus(cm.cluster)
-			statProxyChan <- stat
+		case <- tk.C:
 		}
 	}
 }
@@ -133,28 +137,22 @@ func (cm *cephMonitor) reconfig(osdIDS []int, cluster string, timeout int, min, 
 
 func (cm *cephMonitor) latencyMonitoringFiber(latsChan chan<- *cephLats) {
 	defer cm.wg.Done()
+	defer close(latsChan)
+
+	tk := time.NewTicker(time.Duration(cm.timeout) * time.Second)
+	defer tk.Stop()
+
 	log.Printf("Latency monitoring fiber started")
 	prevOpsMap := make([]map[string]bool,  len(cm.osdIDs))
 	for idx := range cm.osdIDs {
 		prevOpsMap[idx] = make(map[string]bool)
 	}
 
-	sleep_duration := time.Duration(0)
+	wgSubl := sync.WaitGroup{}
 
 	for {
-		select{
-		case <- cm.quit:
-			close(latsChan)
-			log.Print("Latency monitoring fiber stopped due to cm.quit")
-			return
-		case <- time.After(sleep_duration):
-		}
-		start := time.Now()
 		log.Printf("Start collecting lats for osd id %v", cm.osdIDs)
-
-		wgSubl := sync.WaitGroup{}
 		wgSubl.Add(len(cm.osdIDs))
-
 		for idx, osdID := range cm.osdIDs {
 			go func(osdID int, prevOPS *map[string]bool) {
 				defer wgSubl.Done()
@@ -168,17 +166,19 @@ func (cm *cephMonitor) latencyMonitoringFiber(latsChan chan<- *cephLats) {
 		}
 
 		wgSubl.Wait()
-
-		sleep_duration = time.Duration(cm.timeout) * time.Second - time.Now().Sub(start)
-		if sleep_duration < 0 {
-			sleep_duration = 0
+		select{
+		case <- cm.quit:
+			log.Print("Latency monitoring fiber stopped due to cm.quit")
+			return
+		case <- tk.C:
 		}
 	}
 }
 
 func  (cm *cephMonitor) storageFiber(latsListChan <-chan *cephLats, statProxyChan <-chan *CephStatus, min, max, bins uint32) {
-	log.Printf("Storage fiber started")
 	defer cm.wg.Done()
+
+	log.Printf("Storage fiber started")
 	rhisto := makeHisto(float64(min), float64(max), int(bins))
 	whisto := makeHisto(float64(min), float64(max), int(bins))
 	var currStatus *CephStatus

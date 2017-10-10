@@ -10,6 +10,7 @@ import datetime
 import threading
 import functools
 import socketserver
+import urllib.request
 from http.server import SimpleHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Any, Tuple, Dict, Optional, Set, Union
@@ -364,23 +365,62 @@ def update_cfg_with_osds_for_nodes(config: Dict[str, Any], mon_rpcs: Dict[str, M
     logger.debug("Detected nodes configs:")
     for line in osd_configs_s:
         logger.debug(line)
+    config['osds_orig'] = config['osds']
     config['osds'] = osds_config
 
 
-def load_cycle(config: Dict[str, Any], storage: Storage, stop: bool = False) -> None:
-    osd_rpc = {}
+def get_all_rpc(config: Dict[str, Any]) -> Tuple[Dict[str, MaybeMonRpc], Dict[str, MaybeMonRpc]]:
     monitors_rpc = {addr: None for addr in config['mons']}  # type: Dict[str, MaybeMonRpc]
+    update_cfg_with_osds_for_nodes(config, monitors_rpc)
+    osd_rpc = {addr: None for addr in config['osds']}
+    return monitors_rpc, osd_rpc
 
+
+def stop_rpcs(config: Dict[str, Any]):
+    _, osd_rpc = get_all_rpc(config)
+    with ThreadPoolExecutor(config.get('collect_threads', 16)) as pool:
+        list(pool.map(functools.partial(pooling_stop_function, config=config), osd_rpc))
+
+
+def check_rpc_servers(config: Dict[str, Any]):
+    mons_rpc, osd_rpc = get_all_rpc(config)
+    rpc_timeout = config.get("rpc_timeout", DEFAULT_RPC_TIMEOUT)
+
+    def check_rpc(addr):
+        try:
+            rpc = init_rpc_mon(addr, config, False)
+            rpc.GetCephStatus(stat_pb2.Empty(), timeout=rpc_timeout)
+            return True, addr
+        except:
+            return False, addr
+
+    def check_http(addr):
+        try:
+            with urllib.request.urlopen("http://{}:8062".format(addr.split(":")[0]), timeout=rpc_timeout) as fd:
+                fd.read()
+            return True, addr
+        except:
+            return False, addr
+
+
+    with ThreadPoolExecutor(config.get('collect_threads', 16)) as pool:
+        addrs = sorted(mons_rpc) + sorted(osd_rpc)
+
+        print("RPC:")
+        for is_ok, addr in pool.map(check_rpc, addrs):
+            print("    {}: {}".format(addr, "OK" if is_ok else "FAIL"))
+
+        print("HTTP:")
+        for is_ok, addr in pool.map(check_http, addrs):
+            print("    {}: {}".format(addr, "OK" if is_ok else "FAIL"))
+
+
+def load_cycle(config: Dict[str, Any], storage: Storage) -> None:
+    monitors_rpc, osd_rpc = get_all_rpc(config)
     try:
         cthreads = config.get('collect_threads', 16)
         with ThreadPoolExecutor(cthreads) as pool:
             logger.info("Spawning %d data collection threads", cthreads)
-            update_cfg_with_osds_for_nodes(config, monitors_rpc)
-            osd_rpc = {addr: None for addr in config['osds']}
-
-            if stop:
-                list(pool.map(functools.partial(pooling_stop_function, config=config), osd_rpc))
-                return
 
             plot_percentiles = numpy.array(config.get('plots', {}).get('percentiles', [50, 95, 99]), dtype=float) / 100
 
@@ -585,8 +625,8 @@ def http_thread(config: Dict[str, Any]):
 
 def parse_args(args: List[str]) -> Any:
     parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=('pool', 'stop', 'check'), help="Action to run")
     parser.add_argument("config", help="YAML config file")
-    parser.add_argument("--stop-monitoring", action='store_true', help="Stop ceph pooling on rpc nodes")
     return parser.parse_args(args)
 
 
@@ -594,16 +634,20 @@ def main(argv: List[str]) -> int:
     args = parse_args(argv[1:])
     config = yaml.load(open(args.config))
 
-    if not args.stop_monitoring:
+    if args.action == 'pool':
         config['plots']['plots'] = [PlotParams(*dt) for dt in config['plots']['plots']]
         http_th = threading.Thread(target=http_thread, args=(config,))
         http_th.daemon = True
         http_th.start()
         storage = Storage(config)
+        load_cycle(config, storage)
+    elif args.action == 'stop':
+        stop_rpcs(config)
+    elif args.action == 'check':
+        check_rpc_servers(config)
     else:
-        storage = None
-
-    load_cycle(config, storage, args.stop_monitoring)
+        print("Unknown action", args.action)
+        return 1
     return 0
 
 if __name__ == "__main__":
