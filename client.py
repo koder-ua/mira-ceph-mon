@@ -396,7 +396,7 @@ def check_rpc_servers(config: Dict[str, Any]):
 
     def check_http(addr):
         try:
-            with urllib.request.urlopen("http://{}:8062".format(addr.split(":")[0]), timeout=rpc_timeout) as fd:
+            with urllib.request.urlopen("http://" + addr, timeout=rpc_timeout) as fd:
                 fd.read()
             return True, addr
         except:
@@ -411,7 +411,8 @@ def check_rpc_servers(config: Dict[str, Any]):
             print("    {}: {}".format(addr, "OK" if is_ok else "FAIL"))
 
         print("HTTP:")
-        for is_ok, addr in pool.map(check_http, addrs):
+        http_addrs = ["{}:8062".format(addr.split(":")[0]) for addr in addrs]
+        for is_ok, addr in pool.map(check_http, http_addrs):
             print("    {}: {}".format(addr, "OK" if is_ok else "FAIL"))
 
 

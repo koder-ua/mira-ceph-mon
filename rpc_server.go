@@ -36,17 +36,13 @@ func (rpc *myRPCServer) SetupLatencyMonitoring(ctx context.Context, sett *CephSe
 		}
 	}
 
-	rpc.cm.reconfig(rpc.osdIds, rpc.clusterName, rpc.latsCollectTimeout,
-		            sett.HistoMin, sett.HistoMax, sett.HistoBins)
+	rpc.cm.config(rpc.osdIds, rpc.clusterName, rpc.latsCollectTimeout, sett.HistoMin, sett.HistoMax, sett.HistoBins)
 	return &Empty{}, nil
 }
 
 
 func (rpc *myRPCServer) StopLatencyMonitoring(context.Context, *Empty) (*Empty, error) {
-	if rpc.cm.running {
-		log.Print("Stopping previous monitoring fibers")
-		rpc.cm.stop()
-	}
+	rpc.cm.stop()
 	return &Empty{}, nil
 }
 

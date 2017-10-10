@@ -18,11 +18,11 @@
   For manual installation:
     - copy 'bin/monitor' to '/usr/bin/mira-ceph-monitor' to all ceph nodes
     - copy 'mira-ceph-monitor.service' to /lib/systemd/system/ to all ceph nodes
-    - register and start mira-ceph-monitor.service with
+    - register and start mira-ceph-monitor.service on all ceph nodes with
         * systemctl daemon-reload
         * systemctl enable mira-ceph-monitor.service
         * systemctl start mira-ceph-monitor.service
-    - consult with steps from deploy.sh in case of issue
+    - consult with steps from deploy.sh in case of an issue
 
 * run python client.py check cfg.yaml to check server's statuses
 * run python client.py pool cfg.yaml

@@ -12,7 +12,6 @@ type httpCephStatus struct {
 }
 
 const index = `<html><body>
-Cluster: {{.Name}}<br>
 Ceph status: {{.Status}}<br>
 Used GiB: {{.UsedG}}<br>
 FreeG: {{.FreeG}}<br>
@@ -26,23 +25,16 @@ OsdMapEpoch: {{.OsdMapEpoch}}<br>
 `
 
 type indexVars struct {
-	Name, Status string
+	Status string
 	UsedG, FreeG, DataG, ReadBPS, WriteBPS, ReadsPS, WritesPS, OsdMapEpoch uint32
 }
 
 func (hcs *httpCephStatus) cephStatHandler(w http.ResponseWriter, r *http.Request) {
 	indexParams := indexVars{}
-	stat := hcs.cm.getStatus()
+	stat, err := hcs.cm.getStatus()
 	if stat == nil {
-		stat2, err := getCephStatus("ceph")
-		indexParams.Name = "ceph"
-		if err != nil {
-			fmt.Fprintf(w, "<html><body>Error: failed to get ceph status %v</body></html>", err)
-			return
-		}
-		stat = stat2
-	} else {
-		indexParams.Name = hcs.cm.cluster
+		fmt.Fprintf(w, "<html><body>Error: failed to get ceph status: %v</body></html>", err)
+		return
 	}
 
 	switch stat.Status {
