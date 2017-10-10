@@ -9,7 +9,7 @@ GOLINT = /home/koder/go/bin/golint
 ALL_GO_FILES = $(wildcard *.go)
 LINTABLE_GO_FILES = $(filter-out $(GO_PB_FILES),$(ALL_GO_FILES))
 
-all: $(PROG) $(PY_PB_FILES) $(GO_PB_FILES)
+all: $(PROG) $(PY_PB_FILES) $(GO_PB_FILES) bz2
 
 $(PROG): *.go $(GO_PB_FILES) Makefile
 	env GOPATH=$(GPATH) go build -o $(PROG)

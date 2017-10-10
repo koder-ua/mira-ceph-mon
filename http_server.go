@@ -12,44 +12,70 @@ type httpCephStatus struct {
 }
 
 const index = `<html><body>
-Ceph status is {{.Status}}
+Cluster: {{.Name}}<br>
+Ceph status: {{.Status}}<br>
+Used GiB: {{.UsedG}}<br>
+FreeG: {{.FreeG}}<br>
+DataG: {{.DataG}}<br>
+ReadBPS: {{.ReadBPS}}<br>
+WriteBPS: {{.WriteBPS}}<br>
+ReadsPS: {{.ReadsPS}}<br>
+WritesPS: {{.WritesPS}}<br>
+OsdMapEpoch: {{.OsdMapEpoch}}<br>
 </body></html>
 `
 
 type indexVars struct {
-	Status string
+	Name, Status string
+	UsedG, FreeG, DataG, ReadBPS, WriteBPS, ReadsPS, WritesPS, OsdMapEpoch uint32
 }
 
 func (hcs *httpCephStatus) cephStatHandler(w http.ResponseWriter, r *http.Request) {
+	indexParams := indexVars{}
 	stat := hcs.cm.getStatus()
 	if stat == nil {
-		fmt.Fprintf(w, "<html><body>No data yet</body></html>")
+		stat2, err := getCephStatus("ceph")
+		indexParams.Name = "ceph"
+		if err != nil {
+			fmt.Fprintf(w, "<html><body>Error: failed to get ceph status %v</body></html>", err)
+			return
+		}
+		stat = stat2
 	} else {
-		indexParams := indexVars{}
-		switch stat.Status {
-		case HealthOk:
-			indexParams.Status = "Ok"
-		case HealthWarn:
-			indexParams.Status = "Warning"
-		case HealtheErr:
-			indexParams.Status = "Error"
-		default:
-			panic("")
-		}
-
-		indexT, err := template.New("index").Parse(index)
-		if err != nil {
-			fmt.Fprintf(w, "<html><body>Error: failed to parse template %v</body></html>", err)
-			return
-		}
-
-		err = indexT.Execute(w, indexParams)
-		if err != nil {
-			fmt.Fprintf(w, "<html><body>Error: failed to execute template %v</body></html>", err)
-			return
-		}
+		indexParams.Name = hcs.cm.cluster
 	}
 
+	switch stat.Status {
+	case HealthOk:
+		indexParams.Status = "Ok"
+	case HealthWarn:
+		indexParams.Status = "Warning"
+	case HealtheErr:
+		indexParams.Status = "Error"
+	default:
+		panic("")
+	}
+
+	indexParams.UsedG = stat.UsedG
+	indexParams.FreeG = stat.FreeG
+	indexParams.DataG = stat.DataG
+	indexParams.ReadBPS = stat.ReadBPS
+	indexParams.WriteBPS = stat.WriteBPS
+	indexParams.ReadsPS = stat.ReadsPS
+	indexParams.WritesPS = stat.WritesPS
+	indexParams.OsdMapEpoch = stat.OsdMapEpoch
+
+	indexT, err := template.New("index").Parse(index)
+	if err != nil {
+		fmt.Fprintf(w, "<html><body>Error: failed to parse template %v</body></html>", err)
+		return
+	}
+
+	err = indexT.Execute(w, indexParams)
+	if err != nil {
+		fmt.Fprintf(w, "<html><body>Error: failed to execute template %v</body></html>", err)
+		return
+	}
 }
 
 func httpServer(addr string , cm *cephMonitor) {

@@ -30,6 +30,7 @@ type cephLatsHisto struct {
 	rlats, wlats []uint32
 }
 
+// there a race condition with updating this structure, which I decide not to fix for now
 type cephMonitor struct {
 	cluster string
 	osdIDs []int
@@ -56,6 +57,7 @@ func newCephMonitor() *cephMonitor {
 
 
 func (cm *cephMonitor) start(osdIDS []int, cluster string, timeout int, min, max, bins uint32) {
+	// there a race condition here which I decide not to fix for now
 	if cm.running {
 		log.Fatal("Starting already running monitor")
 	}
@@ -93,11 +95,12 @@ func (cm *cephMonitor) statusMonitoringFiber(statProxyChan chan<- *CephStatus) {
 }
 
 func (cm *cephMonitor) stop() {
+	// there a race condition here which I decide not to fix for now
 	if cm.running {
+		cm.running = false
 		close(cm.quit)
 		cm.wg.Wait()
 		cm.quit = nil
-		cm.running = false
 		log.Printf("All ceph bg fibers stopped")
 	}
 }

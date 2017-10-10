@@ -563,7 +563,7 @@ def http_thread(config: Dict[str, Any]):
                 key = url_map.get(self.path)
 
                 with graph_dict_lock:
-                    _, plot = graph_dict.get(key)
+                    _, plot = graph_dict.get(key, (None, None))
 
                 if plot is not None:
                     self.send_response(200)
