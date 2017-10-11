@@ -13,6 +13,7 @@ func main() {
 	httpAddr := flag.String("http", "", "Addr for http server")
 	logFile := flag.String("logfile", "", "Store logs to file FILE")
 	isSilent := flag.Bool("silent", false, "Don't log to stdout")
+	logLevel := flag.String("loglevel", "DEBUG", "Log level (default = DEBUG)")
 	ignoreNonRoot := flag.Bool("ignorenonroot", false, "Don't fail if start not under root")
 	flag.Parse()
 
@@ -46,24 +47,27 @@ func main() {
 			}
 			defer logFD.Close()
 		}
-		log.SetOutput(logFD)
+		//log.SetOutput(logFD)
+		setup_logging(*logLevel, logFD)
 	} else {
 		if logFD != nil {
-			log.SetOutput(io.MultiWriter(os.Stdout, logFD))
+			//log.SetOutput(io.MultiWriter(os.Stdout, logFD))
+			setup_logging(*logLevel, io.MultiWriter(os.Stdout, logFD))
 		}
 	}
 
-	log.Printf("Starting ceph monitoring routines")
+	clog.Printf("Starting ceph monitoring routines")
 
 	if *rpcAddr == "" && *httpAddr == "" {
-		log.Fatal("Either rpc or http addr need to be passed")
+		clog.Panic("Either rpc or http addr need to be passed")
+		panic("")
 	}
 	if *httpAddr != "" {
-		log.Printf("Starting http server at %s", *httpAddr)
+		clog.Info("Starting http server at ", *httpAddr)
 	}
 
 	if *httpAddr != "" {
-		log.Printf("Starting rpc server at %s", *rpcAddr)
+		clog.Info("Starting rpc server at ", *rpcAddr)
 	}
 
 	cm := newCephMonitor()

@@ -1,7 +1,6 @@
 package main
 
 import ("math"
-		"log"
 		"github.com/golang/protobuf/proto"
 		"os/exec"
 		"fmt"
@@ -66,7 +65,7 @@ func newCephMonitor() *cephMonitor {
 
 
 func (cm *cephMonitor) configFiber(configChannel <-chan *monitoringConfig) {
-	log.Printf("Ceph config fiber started")
+	clog.Info("Ceph config fiber started")
 
 	// start with stubs
 	latsHistoChan := cm.latsHistoChan
@@ -82,7 +81,7 @@ func (cm *cephMonitor) configFiber(configChannel <-chan *monitoringConfig) {
 			if quit != nil {
 				close(quit)
 				cm.wg.Wait()
-				log.Printf("All ceph bg fibers stopped")
+				clog.Info("All ceph bg fibers stopped")
 				quit = nil
 			}
 
@@ -97,14 +96,14 @@ func (cm *cephMonitor) configFiber(configChannel <-chan *monitoringConfig) {
 				if cfg != nil {
 					defer func() { cfg.done <- struct{}{} }()
 				}
-				log.Printf("Ceph config fiber exits due to request")
+				clog.Info("Ceph config fiber exits due to request")
 				return
 			}
 
 			// start routines
 			if cfg.running {
 				if quit != nil {
-					log.Printf("Attempt to start already running monitor")
+					clog.Warn("Attempt to start already running monitor")
 					cfg.done <- struct{}{}
 					continue
 				}
@@ -128,7 +127,7 @@ func (cm *cephMonitor) configFiber(configChannel <-chan *monitoringConfig) {
 				go cm.latencyMonitoringFiber(latsListChan, quit)
 				go cm.storageFiber(latsListChan, statProxyChan, cfg.min, cfg.max, cfg.bins)
 
-				log.Printf("Monitoring started, result channel is %v", cm.latsHistoChan)
+				clog.Debugf("Monitoring started, result channel is %v", cm.latsHistoChan)
 			} else {
 				// switch channels to local stubs
 				latsHistoChan = cm.latsHistoChan
@@ -158,20 +157,20 @@ func (cm *cephMonitor) config(osdIDS []int, cluster string, timeout int, min, ma
 }
 
 func (cm *cephMonitor) statusMonitoringFiber(statProxyChan chan<- *CephStatus, quit <-chan struct{}) {
-	log.Printf("Status monitoring fiber started")
+	clog.Info("Status monitoring fiber started")
 	defer cm.wg.Done()
 	defer close(statProxyChan)
 	tk := time.NewTicker(time.Duration(cm.timeout) * time.Second)
 	defer tk.Stop()
 
 	for {
-		log.Printf("Getting new ceph status")
+		clog.Debug("Getting new ceph status")
 		stat, _ := getCephStatus(cm.cluster)
 		statProxyChan <- stat
 
 		select{
 		case <- quit:
-			log.Printf("Status monitoring fiber stopped due to quit channel closed")
+			clog.Info("Status monitoring fiber stopped due to quit channel closed")
 			return
 		case <- tk.C:
 		}
@@ -214,7 +213,7 @@ func (cm *cephMonitor) latencyMonitoringFiber(latsChan chan<- *cephLats, quit <-
 	tk := time.NewTicker(time.Duration(cm.timeout) * time.Second)
 	defer tk.Stop()
 
-	log.Printf("Latency monitoring fiber started")
+	clog.Info("Latency monitoring fiber started")
 	prevOpsMap := make([]map[string]bool,  len(cm.osdIDs))
 	for idx := range cm.osdIDs {
 		prevOpsMap[idx] = make(map[string]bool)
@@ -223,7 +222,7 @@ func (cm *cephMonitor) latencyMonitoringFiber(latsChan chan<- *cephLats, quit <-
 	wgSubl := sync.WaitGroup{}
 
 	for {
-		log.Printf("Start collecting lats for osd id %v", cm.osdIDs)
+		clog.Debug("Start collecting lats for osd id %v", cm.osdIDs)
 		wgSubl.Add(len(cm.osdIDs))
 		for idx, osdID := range cm.osdIDs {
 			go func(osdID int, prevOPS *map[string]bool) {
@@ -232,7 +231,7 @@ func (cm *cephMonitor) latencyMonitoringFiber(latsChan chan<- *cephLats, quit <-
 				if err == nil {
 					latsChan <- lats
 				} else {
-					log.Printf("ERROR: Failed to get lat from %d: %v", osdID, err)
+					clog.Errorf("ERROR: Failed to get lat from %d: %v", osdID, err)
 				}
 			}(osdID, &prevOpsMap[idx])
 		}
@@ -240,7 +239,7 @@ func (cm *cephMonitor) latencyMonitoringFiber(latsChan chan<- *cephLats, quit <-
 		wgSubl.Wait()
 		select{
 		case <- quit:
-			log.Print("Latency monitoring fiber stopped due to cm.quit")
+			clog.Info("Latency monitoring fiber stopped due to cm.quit")
 			return
 		case <- tk.C:
 		}
@@ -251,7 +250,7 @@ func  (cm *cephMonitor) storageFiber(latsListChan <-chan *cephLats,
 									 statProxyChan <-chan *CephStatus, min, max, bins uint32) {
 	defer cm.wg.Done()
 
-	log.Printf("Storage fiber started")
+	clog.Info("Storage fiber started")
 	rhisto := makeHisto(float64(min), float64(max), int(bins))
 	whisto := makeHisto(float64(min), float64(max), int(bins))
 	var currStatus *CephStatus
@@ -277,7 +276,7 @@ func  (cm *cephMonitor) storageFiber(latsListChan <-chan *cephLats,
 		case cm.latsHistoChanNoClear <- &cephLatsHisto{rhisto.bins, whisto.bins}:
 		}
 	}
-	log.Printf("Storage fiber stopped due to all input channels closed")
+	clog.Info("Storage fiber stopped due to all input channels closed")
 }
 
 func (status *CephStatus) serialize()([]byte, error) {
@@ -300,7 +299,8 @@ func parseCephHealth(cephSBt []byte) (*CephStatus, error) {
 	case "HEALTH_ERR":
 		status.Status = HealtheErr;
 	default:
-		log.Fatal("Unknown status", overallStatus)
+		clog.Panic("Unknown status", overallStatus)
+		panic("Unknown status")
 	}
 
 	GiB := float64(math.Pow(1024, 3))
@@ -371,7 +371,7 @@ func runOSDSocketCMD(osdID int, cluster string, cmd ...string) ([]byte, error) {
 	var newCmd []string
 	newCmd = append(newCmd, "--admin-daemon", getOSDSocket(osdID, cluster))
 	newCmd = append(newCmd, cmd...)
-	log.Print("ceph ", strings.Join(newCmd," "))
+	clog.Debug("ceph ", strings.Join(newCmd," "))
 	cmdObj := exec.Command("ceph", newCmd...)
 	return cmdObj.CombinedOutput()
 }
@@ -379,6 +379,7 @@ func runOSDSocketCMD(osdID int, cluster string, cmd ...string) ([]byte, error) {
 func parseCephTime(timeS string) uint64 {
 	timeV := strings.Split(timeS, ".")
 	if len(timeV) != 2 {
+		clog.Panic("Broken datetime format")
 		panic("Broken datetime format")
 	}
 

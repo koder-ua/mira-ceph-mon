@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"net/http"
 	"fmt"
 	"html/template"
@@ -75,6 +74,7 @@ func httpServer(addr string , cm *cephMonitor) {
 	http.HandleFunc("/", hcs.cephStatHandler) // set router
 	err := http.ListenAndServe(addr, nil) // set listen port
 	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
+		clog.Panic("ListenAndServe: ", err)
+		panic("")
 	}
 }

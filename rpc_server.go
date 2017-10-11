@@ -2,7 +2,6 @@ package main
 
 import (
 	"net"
-	"log"
 	"google.golang.org/grpc"
 	"golang.org/x/net/context"
 	"bytes"
@@ -19,7 +18,7 @@ type myRPCServer struct {
 }
 
 func (rpc *myRPCServer) SetupLatencyMonitoring(ctx context.Context, sett *CephSettings) (*Empty, error) {
-	log.Printf("Get new config %v", *sett)
+	clog.Infof("Get new config %v", *sett)
 	rpc.clusterName = sett.Cluster
 	rpc.osdIds = make([]int, len(sett.OsdIDS))
 	for idx, vl := range sett.OsdIDS {
@@ -123,11 +122,12 @@ func (rpc *myRPCServer) GetCephInfo(ctx context.Context, clName *ClusterName) (*
 func rpcServer(bindTo string, cm *cephMonitor) {
 	ssok, err := net.Listen("tcp", bindTo)
 	if err != nil {
-		log.Fatal("Error in net.Listen: ", bindTo, err)
+		clog.Panic("Error in net.Listen: ", bindTo, err)
+		panic("")
 	}
 
 	defer ssok.Close()
-	log.Print("Listening on ", bindTo)
+	clog.Info("Listening on ", bindTo)
 
 	grpcServer := grpc.NewServer()
 	RegisterSensorRPCServer(grpcServer, &myRPCServer{cm: cm})

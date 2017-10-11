@@ -1,9 +1,6 @@
 package main
 
-import (
-	"math"
-	"log"
-)
+import "math"
 
 // Histogram - log-based histogram class
 type Histogram struct {
@@ -16,7 +13,6 @@ func makeHisto(min, max float64, binCount int) *Histogram {
 		return nil
 	}
 	step := math.Log2(max/min) / float64(binCount)
-	log.Printf("Histo: min: %.2f, max: %.2f, step: %.2f, size: %d", min, max, step, binCount)
 	return &Histogram{min: min, step: step, bins: make([]uint32, binCount)}
 }
 
