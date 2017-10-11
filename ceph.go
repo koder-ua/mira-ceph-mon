@@ -21,7 +21,6 @@ const (
 	HealtheErr = iota
 )
 
-
 type cephLats struct {
 	rlats, wlats []uint32
 }
@@ -32,6 +31,7 @@ type cephLatsHisto struct {
 
 type monitoringConfig struct {
 	running bool
+	exit bool
 	cluster string
 	osdIDS []int
 	timeout int
@@ -45,26 +45,27 @@ type cephMonitor struct {
 	latsHistoChan chan *cephLatsHisto
 	latsHistoChanNoClear chan *cephLatsHisto
 	cephStatChan chan *CephStatus
-	monitoringConfigChan chan *monitoringConfig
+	monitoringConfigChan chan<- *monitoringConfig
 	wg sync.WaitGroup
 	timeout int
 }
 
 
 func newCephMonitor() *cephMonitor {
+	cch := make(chan *monitoringConfig)
 	cm := &cephMonitor{
 		latsHistoChan: make(chan *cephLatsHisto),
 		latsHistoChanNoClear: make(chan *cephLatsHisto),
 		cephStatChan: make(chan *CephStatus),
-		monitoringConfigChan: make(chan *monitoringConfig),
+		monitoringConfigChan: cch,
 		osdIDs: make([]int, 0),
 	}
-	go cm.configFiber()
+	go cm.configFiber(cch)
 	return cm
 }
 
 
-func (cm *cephMonitor) configFiber() {
+func (cm *cephMonitor) configFiber(configChannel <-chan *monitoringConfig) {
 	log.Printf("Ceph config fiber started")
 
 	// start with stubs
@@ -73,14 +74,10 @@ func (cm *cephMonitor) configFiber() {
 	cephStatChan := cm.cephStatChan
 	var quit chan struct{}
 
+	exit := false
 	for {
 		select {
-		case cfg := <-cm.monitoringConfigChan:
-			if cfg == nil {
-				log.Printf("Ceph config fiber exits")
-				return
-			}
-
+		case cfg := <-configChannel:
 			// stop routines
 			if quit != nil {
 				close(quit)
@@ -89,12 +86,27 @@ func (cm *cephMonitor) configFiber() {
 				quit = nil
 			}
 
+			if cfg != nil {
+				exit = cfg.exit
+			}
+
+			if cfg == nil || exit {
+				close(cm.latsHistoChan)
+				close(cm.latsHistoChanNoClear)
+				close(cm.cephStatChan)
+				if cfg != nil {
+					defer func() { cfg.done <- struct{}{} }()
+				}
+				log.Printf("Ceph config fiber exits due to request")
+				return
+			}
+
 			// start routines
 			if cfg.running {
 				if quit != nil {
 					log.Printf("Attempt to start already running monitor")
 					cfg.done <- struct{}{}
-					return
+					continue
 				}
 
 				// turn off local stubs
@@ -173,6 +185,9 @@ func (cm *cephMonitor) stop() {
 }
 
 func (cm *cephMonitor) exit() {
+	done := make(chan struct{})
+	cm.monitoringConfigChan <- &monitoringConfig{exit: true, done: done}
+	<- done
 	close(cm.monitoringConfigChan)
 }
 

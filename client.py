@@ -26,7 +26,6 @@ import stat_pb2
 import stat_pb2_grpc
 
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger()
 
 
@@ -406,14 +405,18 @@ def check_rpc_servers(config: Dict[str, Any]):
     with ThreadPoolExecutor(config.get('collect_threads', 16)) as pool:
         addrs = sorted(mons_rpc) + sorted(osd_rpc)
 
+        RED   = "\033[1;31m"
+        GREEN = "\033[0;32m"
+        RESET = "\033[0;0m"
+
         print("RPC:")
         for is_ok, addr in pool.map(check_rpc, addrs):
-            print("    {}: {}".format(addr, "OK" if is_ok else "FAIL"))
+            print("    {}: {}{}".format(addr, (GREEN + "OK") if is_ok else (RED + "FAIL"), RESET))
 
         print("HTTP:")
         http_addrs = ["{}:8062".format(addr.split(":")[0]) for addr in addrs]
         for is_ok, addr in pool.map(check_http, http_addrs):
-            print("    {}: {}".format(addr, "OK" if is_ok else "FAIL"))
+            print("    {}: {}{}".format(addr, (GREEN + "OK") if is_ok else (RED + "FAIL"), RESET))
 
 
 def load_cycle(config: Dict[str, Any], storage: Storage) -> None:
@@ -626,6 +629,8 @@ def http_thread(config: Dict[str, Any]):
 
 def parse_args(args: List[str]) -> Any:
     parser = argparse.ArgumentParser()
+    parser.add_argument("-l", '--log-level', choices=('DEBUG', 'INFO', 'WARNING', 'ERROR', "CRITICAL"),
+                        help="Log level", default='INFO')
     parser.add_argument("action", choices=('pool', 'stop', 'check'), help="Action to run")
     parser.add_argument("config", help="YAML config file")
     return parser.parse_args(args)
@@ -634,6 +639,8 @@ def parse_args(args: List[str]) -> Any:
 def main(argv: List[str]) -> int:
     args = parse_args(argv[1:])
     config = yaml.load(open(args.config))
+
+    logging.basicConfig(level=getattr(logging, args.log_level))
 
     if args.action == 'pool':
         config['plots']['plots'] = [PlotParams(*dt) for dt in config['plots']['plots']]
