@@ -1,7 +1,6 @@
 package main
 
 import ("math"
-		"github.com/golang/protobuf/proto"
 		"os/exec"
 		"fmt"
 		"strconv"
@@ -29,165 +28,78 @@ type cephLatsHisto struct {
 }
 
 type monitoringConfig struct {
-	running bool
-	exit bool
+	stop bool
 	cluster string
 	osdIDS []int
 	timeout int
 	min, max, bins uint32
-	done chan struct{}
 }
 
 type cephMonitor struct {
-	cluster string
-	osdIDs []int
-	latsHistoChan chan *cephLatsHisto
-	latsHistoChanNoClear chan *cephLatsHisto
-	cephStatChan chan *CephStatus
-	monitoringConfigChan chan<- *monitoringConfig
-	wg sync.WaitGroup
-	timeout int
+	// latency channels
+	latsHistoChan <-chan *cephLatsHisto
+	latsHistoNoClearChan <-chan *cephLatsHisto
+
+	// ceph status channel
+	cephStatChan <-chan *CephStatus
+
+	// configuration channels
+	configChans [3]chan<- *monitoringConfig
 }
 
 
 func newCephMonitor() *cephMonitor {
-	cch := make(chan *monitoringConfig)
+	latsHistoChan := make(chan *cephLatsHisto)
+	latsHistoNoClearChan := make(chan *cephLatsHisto)
+	cephStatChan := make(chan *CephStatus)
+	var configChans [3]chan *monitoringConfig
+
+	configChans[0] = make(chan *monitoringConfig)
+	configChans[1] = make(chan *monitoringConfig)
+	configChans[2] = make(chan *monitoringConfig)
+
 	cm := &cephMonitor{
-		latsHistoChan: make(chan *cephLatsHisto),
-		latsHistoChanNoClear: make(chan *cephLatsHisto),
-		cephStatChan: make(chan *CephStatus),
-		monitoringConfigChan: cch,
-		osdIDs: make([]int, 0),
+		latsHistoChan: latsHistoChan,
+		latsHistoNoClearChan: latsHistoNoClearChan,
+		cephStatChan: cephStatChan,
 	}
-	go cm.configFiber(cch)
+
+	cm.configChans[0] = configChans[0]
+	cm.configChans[1] = configChans[1]
+	cm.configChans[2] = configChans[2]
+
+	statProxyChan := make(chan *CephStatus)
+	latProxyChan := make(chan *cephLats)
+
+	go statusMonitoringFiber(statProxyChan, configChans[0])
+	go latencyMonitoringFiber(latProxyChan, configChans[1])
+	go storageFiber(latProxyChan, statProxyChan, configChans[2], latsHistoChan, latsHistoNoClearChan, cephStatChan)
+
 	return cm
 }
 
-
-func (cm *cephMonitor) configFiber(configChannel <-chan *monitoringConfig) {
-	clog.Info("Ceph config fiber started")
-
-	// start with stubs
-	latsHistoChan := cm.latsHistoChan
-	latsHistoChanNoClear := cm.latsHistoChanNoClear
-	cephStatChan := cm.cephStatChan
-	var quit chan struct{}
-
-	exit := false
-	for {
-		select {
-		case cfg := <-configChannel:
-			// stop routines
-			if quit != nil {
-				close(quit)
-				cm.wg.Wait()
-				clog.Info("All ceph bg fibers stopped")
-				quit = nil
-			}
-
-			if cfg != nil {
-				exit = cfg.exit
-			}
-
-			if cfg == nil || exit {
-				close(cm.latsHistoChan)
-				close(cm.latsHistoChanNoClear)
-				close(cm.cephStatChan)
-				if cfg != nil {
-					defer func() { cfg.done <- struct{}{} }()
-				}
-				clog.Info("Ceph config fiber exits due to request")
-				return
-			}
-
-			// start routines
-			if cfg.running {
-				if quit != nil {
-					clog.Warn("Attempt to start already running monitor")
-					cfg.done <- struct{}{}
-					continue
-				}
-
-				// turn off local stubs
-				latsHistoChan = nil
-				latsHistoChanNoClear = nil
-				cephStatChan = nil
-
-				cm.cluster = cfg.cluster
-				cm.osdIDs = make([]int, len(cfg.osdIDS))
-				cm.timeout = cfg.timeout
-				copy(cm.osdIDs, cfg.osdIDS)
-
-				latsListChan := make(chan *cephLats)
-				statProxyChan := make(chan *CephStatus)
-				quit = make(chan struct{})
-
-				cm.wg.Add(3)
-				go cm.statusMonitoringFiber(statProxyChan, quit)
-				go cm.latencyMonitoringFiber(latsListChan, quit)
-				go cm.storageFiber(latsListChan, statProxyChan, cfg.min, cfg.max, cfg.bins)
-
-				clog.Debugf("Monitoring started, result channel is %v", cm.latsHistoChan)
-			} else {
-				// switch channels to local stubs
-				latsHistoChan = cm.latsHistoChan
-				latsHistoChanNoClear = cm.latsHistoChanNoClear
-				cephStatChan = cm.cephStatChan
-			}
-			cfg.done <- struct{}{}
-		case latsHistoChan <- nil:
-		case latsHistoChanNoClear <- nil:
-		case cephStatChan <- nil:
-		}
-	}
-}
-
 func (cm *cephMonitor) config(osdIDS []int, cluster string, timeout int, min, max, bins uint32) {
-	done := make(chan struct{})
-	cm.monitoringConfigChan <- &monitoringConfig{
-		running:true,
-		cluster: cluster,
-		osdIDS: osdIDS,
-		timeout: timeout,
-		min: min,
-		max: max,
-		bins: bins,
-		done: done}
-	<- done
-}
-
-func (cm *cephMonitor) statusMonitoringFiber(statProxyChan chan<- *CephStatus, quit <-chan struct{}) {
-	clog.Info("Status monitoring fiber started")
-	defer cm.wg.Done()
-	defer close(statProxyChan)
-	tk := time.NewTicker(time.Duration(cm.timeout) * time.Second)
-	defer tk.Stop()
-
-	for {
-		clog.Debug("Getting new ceph status")
-		stat, _ := getCephStatus(cm.cluster)
-		statProxyChan <- stat
-
-		select{
-		case <- quit:
-			clog.Info("Status monitoring fiber stopped due to quit channel closed")
-			return
-		case <- tk.C:
-		}
+	cfg := &monitoringConfig{cluster: cluster, osdIDS:  osdIDS, timeout: timeout,
+							 min: min, max: max, bins: bins, stop: false}
+	for _, ch := range cm.configChans {
+		ch <- cfg
 	}
 }
 
 func (cm *cephMonitor) stop() {
-	done := make(chan struct{})
-	cm.monitoringConfigChan <- &monitoringConfig{running:false, done: done}
-	<- done
+	cfg := &monitoringConfig{stop: true}
+	for _, ch := range cm.configChans {
+		ch <- cfg
+	}
 }
 
 func (cm *cephMonitor) exit() {
-	done := make(chan struct{})
-	cm.monitoringConfigChan <- &monitoringConfig{exit: true, done: done}
-	<- done
-	close(cm.monitoringConfigChan)
+	for _, ch := range cm.configChans {
+		close(ch)
+	}
+	for nil != <-cm.latsHistoChan {}
+	for nil != <-cm.cephStatChan {}
+	for nil != <-cm.latsHistoNoClearChan {}
 }
 
 func (cm *cephMonitor) get() *cephLatsHisto {
@@ -195,7 +107,7 @@ func (cm *cephMonitor) get() *cephLatsHisto {
 }
 
 func (cm *cephMonitor) getNoClear() *cephLatsHisto {
-	return <-cm.latsHistoChanNoClear
+	return <-cm.latsHistoNoClearChan
 }
 
 func (cm *cephMonitor) getStatus() (*CephStatus, error) {
@@ -206,28 +118,76 @@ func (cm *cephMonitor) getStatus() (*CephStatus, error) {
 	return res, nil
 }
 
-func (cm *cephMonitor) latencyMonitoringFiber(latsChan chan<- *cephLats, quit <-chan struct{}) {
-	defer cm.wg.Done()
-	defer close(latsChan)
+const stopCycling = 100000000
 
-	tk := time.NewTicker(time.Duration(cm.timeout) * time.Second)
-	defer tk.Stop()
+func statusMonitoringFiber(statProxyChan chan<- *CephStatus, configChan <-chan *monitoringConfig) {
 
-	clog.Info("Latency monitoring fiber started")
-	prevOpsMap := make([]map[string]bool,  len(cm.osdIDs))
-	for idx := range cm.osdIDs {
-		prevOpsMap[idx] = make(map[string]bool)
-	}
-
-	wgSubl := sync.WaitGroup{}
+	cluster := "ceph"
+	timeout := time.Second * stopCycling
+	clog.Info("Status monitoring fiber started")
+	defer close(statProxyChan)
 
 	for {
-		clog.Debug("Start collecting lats for osd id %v", cm.osdIDs)
-		wgSubl.Add(len(cm.osdIDs))
-		for idx, osdID := range cm.osdIDs {
+		ta := time.After(timeout)
+		select{
+		case cfg := <- configChan:
+			if cfg == nil {
+				clog.Info("Status monitoring fiber stopped due to quit channel closed")
+				return
+			} else if cfg.stop {
+				timeout = time.Second * stopCycling
+			} else {
+				timeout = time.Duration(cfg.timeout) * time.Second
+				cluster = cfg.cluster
+			}
+			continue
+		case <- ta:
+		}
+		clog.Debug("Getting new ceph status")
+		stat, _ := getCephStatus(cluster)
+		statProxyChan <- stat
+	}
+}
+
+func latencyMonitoringFiber(latsChan chan<- *cephLats, configChan <-chan *monitoringConfig) {
+	defer close(latsChan)
+
+	cluster := "ceph"
+	timeout := time.Second * stopCycling
+	var osdIDs []int
+	var prevOpsMap []map[string]bool
+
+	clog.Info("Latency monitoring fiber started")
+	wgSubl := sync.WaitGroup{}
+	for {
+		ta := time.After(timeout)
+		select {
+		case cfg := <- configChan:
+			if cfg == nil {
+				clog.Info("Latency monitoring fiber stopped due to cm.quit")
+				return
+			}
+			if cfg.stop {
+				timeout = time.Second * stopCycling
+			} else {
+				timeout = time.Duration(cfg.timeout) * time.Second
+				cluster = cfg.cluster
+				osdIDs = make([]int, len(cfg.osdIDS))
+				copy(osdIDs, cfg.osdIDS)
+				prevOpsMap = make([]map[string]bool, len(cfg.osdIDS))
+				for idx := range prevOpsMap {
+					prevOpsMap[idx] = make(map[string]bool)
+				}
+			}
+			continue
+		case <- ta:
+		}
+		clog.Debugf("Start collecting lats for osd id %v", osdIDs)
+		wgSubl.Add(len(osdIDs))
+		for idx, osdID := range osdIDs {
 			go func(osdID int, prevOPS *map[string]bool) {
 				defer wgSubl.Done()
-				lats, err := getLatList(osdID, cm.cluster, prevOPS)
+				lats, err := getLatList(osdID, cluster, prevOPS)
 				if err == nil {
 					latsChan <- lats
 				} else {
@@ -235,26 +195,27 @@ func (cm *cephMonitor) latencyMonitoringFiber(latsChan chan<- *cephLats, quit <-
 				}
 			}(osdID, &prevOpsMap[idx])
 		}
-
 		wgSubl.Wait()
-		select{
-		case <- quit:
-			clog.Info("Latency monitoring fiber stopped due to cm.quit")
-			return
-		case <- tk.C:
-		}
 	}
 }
 
-func  (cm *cephMonitor) storageFiber(latsListChan <-chan *cephLats,
-									 statProxyChan <-chan *CephStatus, min, max, bins uint32) {
-	defer cm.wg.Done()
+func storageFiber(latsListChan <-chan *cephLats, statProxyChan <-chan *CephStatus, configChan <-chan *monitoringConfig,
+	              latsHistoChan chan<- *cephLatsHisto, latsHistoChanNoClear chan<- *cephLatsHisto,
+			      cephStatChan chan<- *CephStatus) {
+
+	defer close(latsHistoChan)
+	defer close(latsHistoChanNoClear)
+	defer close(cephStatChan)
 
 	clog.Info("Storage fiber started")
-	rhisto := makeHisto(float64(min), float64(max), int(bins))
-	whisto := makeHisto(float64(min), float64(max), int(bins))
 	var currStatus *CephStatus
-	for statProxyChan != nil || latsListChan != nil {
+
+	whisto := makeHisto(1, 30000, int(100))
+	rhisto := makeHisto(1, 30000, int(100))
+
+	for statProxyChan != nil || latsListChan != nil || configChan != nil {
+		clog.Debugf("latsHistoChan=%p, latsHistoChanNoClear=%p, rhisto=%p, whisto=%p",
+			latsHistoChan, latsHistoChanNoClear, rhisto, whisto)
 		select {
 		case status, ok := <-statProxyChan:
 			if !ok {
@@ -262,25 +223,34 @@ func  (cm *cephMonitor) storageFiber(latsListChan <-chan *cephLats,
 			} else {
 				currStatus = status
 			}
-		case cm.cephStatChan <- currStatus:
+		case cfg := <- configChan:
+			if cfg == nil {
+				clog.Info("Lat config chan closed")
+				configChan = nil
+			} else if !cfg.stop {
+				rhisto = makeHisto(float64(cfg.min), float64(cfg.max), int(cfg.bins))
+				whisto = makeHisto(float64(cfg.min), float64(cfg.max), int(cfg.bins))
+				if nil == rhisto || nil == whisto {
+					clog.Panic("Broken config, histos == nil")
+					panic("")
+				}
+			}
+		case cephStatChan <- currStatus:
 		case newData, ok := <- latsListChan:
 			if !ok {
+				clog.Info("Lat list chan closed")
 				latsListChan = nil
 			} else {
 				rhisto.update(newData.rlats)
 				whisto.update(newData.wlats)
 			}
-		case cm.latsHistoChan <- &cephLatsHisto{rhisto.bins, whisto.bins}:
+		case latsHistoChan <- &cephLatsHisto{rhisto.bins, whisto.bins}:
 			whisto.clean()
 			rhisto.clean()
-		case cm.latsHistoChanNoClear <- &cephLatsHisto{rhisto.bins, whisto.bins}:
+		case latsHistoChanNoClear <- &cephLatsHisto{rhisto.bins, whisto.bins}:
 		}
 	}
 	clog.Info("Storage fiber stopped due to all input channels closed")
-}
-
-func (status *CephStatus) serialize()([]byte, error) {
-	return proto.Marshal(status)
 }
 
 func parseCephHealth(cephSBt []byte) (*CephStatus, error) {

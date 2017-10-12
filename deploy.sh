@@ -59,10 +59,14 @@ function show {
 
     for node in $NODES ; do
         SRV_STAT=$(ssh $node sudo systemctl status $SERVICE | grep Active)
-        if [[ $SRV_STAT == *" inactive "* ]]; then
+        if [[ $SRV_STAT == *" inactive "* ]] ; then
             printf "%-20s : %b %s %b\n" "$node" "$RED" "$SRV_STAT" "$NC"
         else
-            printf "%-20s : %b %s %b\n" "$node" "$GREEN" "$SRV_STAT" "$NC"
+            if [[ $SRV_STAT == *" failed "* ]] ; then
+                printf "%-20s : %b %s %b\n" "$node" "$RED" "$SRV_STAT" "$NC"
+            else
+                printf "%-20s : %b %s %b\n" "$node" "$GREEN" "$SRV_STAT" "$NC"
+            fi
         fi
     done
 }
