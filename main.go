@@ -1,21 +1,61 @@
 package main
 
 import (
-		"flag"
+		//"flag"
 		"os/user"
 		"io"
 		"os"
 		"log"
+		"gopkg.in/alecthomas/kingpin.v2"
 )
 
+
+var (
+	app      = kingpin.New(os.Args[0], "Ceph historic ops latency & Co track daemon")
+	rpcAddr  = app.Flag("rpc", "Addr for grpc server").PlaceHolder("IP:PORT").Short('r').String()
+	httpAddr = app.Flag("http", "Addr for http server").PlaceHolder("IP:PORT").Short('h').String()
+	logFile  = app.Flag("logfile", "Store logs to file FILE").Short('f').String()
+	isSilent = app.Flag("silent", "Don't log to stdout").Short('q').Bool()
+	logLevel = app.Flag("loglevel", "Log level (default = DEBUG)").Default("DEBUG").
+		Enum("DEBUG", "INFO", "WARNING", "ERROR", "FATAL")
+	ignoreNonRoot = app.Flag("ignorenonroot", "Don't fail if start not under root").Short('i').Bool()
+)
+
+func openLogFD(silent bool, fname string) (io.Writer, func()) {
+	var fd io.Writer
+	var logFD *os.File
+	defer_close := func(){}
+
+	if fname != "" {
+		var err error
+		logFD, err = os.OpenFile(fname, os.O_RDWR | os.O_CREATE | os.O_APPEND, 0644)
+		if err != nil {
+			log.Fatalf("Error opening file %s: %v", fname, err)
+		}
+		defer_close = func(){logFD.Close()}
+	}
+
+	if silent {
+		if logFD == nil {
+			var err error
+			logFD, err = os.OpenFile("/dev/null", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0644)
+			if err != nil {
+				log.Fatalf("Error opening file %s: %v", fname, err)
+			}
+			defer_close = func(){logFD.Close()}
+		}
+		fd = logFD
+	} else {
+		if logFD != nil {
+			fd = io.MultiWriter(os.Stdout, logFD)
+		}
+	}
+	return fd, defer_close
+}
+
 func main() {
-	rpcAddr := flag.String("rpc", "", "Addr for grpc server")
-	httpAddr := flag.String("http", "", "Addr for http server")
-	logFile := flag.String("logfile", "", "Store logs to file FILE")
-	isSilent := flag.Bool("silent", false, "Don't log to stdout")
-	logLevel := flag.String("loglevel", "DEBUG", "Log level (default = DEBUG)")
-	ignoreNonRoot := flag.Bool("ignorenonroot", false, "Don't fail if start not under root")
-	flag.Parse()
+	app.Version("0.0.1")
+	app.Parse(os.Args[1:])
 
 	if !*ignoreNonRoot {
 		userInfo, err := user.Current()
@@ -27,34 +67,9 @@ func main() {
 		}
 	}
 
-	var logFD *os.File
-
-	if *logFile != "" {
-		var err error
-		logFD, err = os.OpenFile(*logFile, os.O_RDWR | os.O_CREATE | os.O_APPEND, 0644)
-		if err != nil {
-			log.Fatalf("Error opening file %s: %v", *logFile, err)
-		}
-		defer logFD.Close()
-	}
-
-	if *isSilent {
-		if logFD == nil {
-			var err error
-			logFD, err = os.OpenFile("/dev/null", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0644)
-			if err != nil {
-				log.Fatalf("Error opening file %s: %v", *logFile, err)
-			}
-			defer logFD.Close()
-		}
-		//log.SetOutput(logFD)
-		setup_logging(*logLevel, logFD)
-	} else {
-		if logFD != nil {
-			//log.SetOutput(io.MultiWriter(os.Stdout, logFD))
-			setup_logging(*logLevel, io.MultiWriter(os.Stdout, logFD))
-		}
-	}
+	logFD, deferCall := openLogFD(*isSilent, *logFile)
+	defer deferCall()
+	setup_logging(*logLevel, logFD)
 
 	clog.Printf("Starting ceph monitoring routines")
 
