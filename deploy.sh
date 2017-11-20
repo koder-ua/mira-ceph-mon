@@ -17,7 +17,7 @@ function clean {
     set +e
     for node in $NODES ; do
         CMD="systemctl stop $SERVICE ; systemctl disable $SERVICE"
-        CMD="$CMD ; rm -f  $TARGET $LOG"
+        CMD="$CMD ; rm -f $SRV_FILE_DST_PATH $TARGET $LOG"
         echo "$CMD" | ssh $node sudo bash
     done
     set -e
